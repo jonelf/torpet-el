@@ -21,6 +21,12 @@ Subscribe to the ntfy topic that `setup-params.sh` prints, in the ntfy app on yo
 curl -X POST -H "Authorization: Bearer <api-key>" <function-url>test
 ```
 
+On iPhone, a Focus such as Sleep or Do Not Disturb holds notifications back, so a freezer alarm at night only
+shows up once you open the ntfy app. To let the alarms through, open **Settings → Focus → Sleep → Apps → Add** and
+pick **ntfy**, and do the same for any other Focus you use. The ring/silent switch still applies: with the phone on
+silent the alarm shows on the lock screen but makes no sound. Install the app named **ntfy** by Philipp Heckel,
+the author of ntfy.
+
 To change the code, edit `lambda/index.mjs` and run `./deploy.sh` again. Logs: `aws logs tail /aws/lambda/torpet-el --follow --profile personal`.
 
 ## Alarms
