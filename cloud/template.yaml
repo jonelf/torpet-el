@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Torpet El: polls Tuya smart plugs every five minutes, stores readings in DynamoDB and sends
+  alarms through ntfy. Sized to stay within the AWS Always Free tier.
+
+Parameters:
+  KeepDays:
+    Type: Number
+    Default: 90
+    Description: Days to keep readings before DynamoDB's TTL deletes them.
+
+Resources:
+  Table:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName: TorpetEl
+      # Provisioned (not on-demand) because only provisioned capacity is in the Always Free tier
+      # (25 read + 25 write units per account).
+      BillingMode: PROVISIONED
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 2
+      AttributeDefinitions:
+        - { AttributeName: pk, AttributeType: S }
+        - { AttributeName: sk, AttributeType: N }
+      KeySchema:
+        - { AttributeName: pk, KeyType: HASH }
+        - { AttributeName: sk, KeyType: RANGE }
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/torpet-el
+      RetentionInDays: 14
+
+  FunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: torpet-el
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [logs:CreateLogStream, logs:PutLogEvents]
+                Resource: !Sub '${LogGroup.Arn}'
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:Query
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource: !GetAtt Table.Arn
+              - Effect: Allow
+                Action: ssm:GetParametersByPath
+                Resource: !Sub 'arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter/torpet-el'
+              # SecureStrings use the AWS managed key aws/ssm, which already lets the account decrypt through SSM.
+
+  Function:
+    Type: AWS::Lambda::Function
+    DependsOn: LogGroup
+    Properties:
+      FunctionName: torpet-el
+      Description: Polls Tuya plugs, stores readings, sends ntfy alarms, serves the Mac app
+      Runtime: nodejs22.x
+      Architectures: [arm64]
+      Handler: index.handler
+      MemorySize: 128
+      Timeout: 30
+      Role: !GetAtt FunctionRole.Arn
+      Environment:
+        Variables:
+          TABLE: !Ref Table
+          PARAM_PATH: /torpet-el
+          KEEP_DAYS: !Ref KeepDays
+      # Placeholder. deploy.sh uploads lambda/index.mjs right after the stack, so no S3 bucket is needed.
+      Code:
+        ZipFile: |
+          exports.handler = async () => { console.log('Code not uploaded yet: run deploy.sh'); };
+
+  # Runs the poll every five minutes. EventBridge Scheduler: 14 million free invocations a month.
+  ScheduleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: scheduler.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { 'aws:SourceAccount': !Ref AWS::AccountId }
+      Policies:
+        - PolicyName: invoke
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt Function.Arn
+
+  Schedule:
+    Type: AWS::Scheduler::Schedule
+    Properties:
+      Name: torpet-el-poll
+      ScheduleExpression: rate(5 minutes)
+      FlexibleTimeWindow: { Mode: 'OFF' }
+      Target:
+        Arn: !GetAtt Function.Arn
+        RoleArn: !GetAtt ScheduleRole.Arn
+        Input: '{"source":"schedule"}'
+        # The next run comes in five minutes anyway.
+        RetryPolicy: { MaximumRetryAttempts: 0 }
+
+  # HTTPS endpoint for the Mac app. Public URL, but every request needs the api-key from Parameter Store.
+  FunctionUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      TargetFunctionArn: !GetAtt Function.Arn
+      AuthType: NONE
+
+  FunctionUrlPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunctionUrl
+      Principal: '*'
+      FunctionUrlAuthType: NONE
+
+  FunctionUrlInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref Function
+      Action: lambda:InvokeFunction
+      Principal: '*'
+      InvokedViaFunctionUrl: true
+
+Outputs:
+  FunctionUrl:
+    Description: Base URL for the Mac app
+    Value: !GetAtt FunctionUrl.FunctionUrl
+  TableName:
+    Value: !Ref Table
