@@ -21,6 +21,13 @@ echo "  Data centers: centralEurope westernEurope westernAmerica easternAmerica 
 old_region="$(current tuya-region)"
 read -r -p "  Data center [${old_region:-centralEurope}]: " region
 put tuya-region String "${region:-${old_region:-centralEurope}}"
+echo "  When the IoT Core trial expires (Cloud → Cloud Services). You get ntfy reminders 14, 3 and 0 days before."
+while :; do
+  read -r -p "  Trial expires, YYYY-MM-DD [$(current tuya-trial-expires)]: " expires
+  [ -z "$expires" ] && break
+  if [[ "$expires" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then put tuya-trial-expires String "$expires"; break; fi
+  echo "  Write the date as YYYY-MM-DD."
+done
 
 echo
 topic="$(current ntfy-topic)"

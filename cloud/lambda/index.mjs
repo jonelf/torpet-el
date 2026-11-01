@@ -59,6 +59,7 @@ async function config() {
     ntfyToken: p['ntfy-token'],
     apiKey: p['api-key'],
     lang: p.language === 'en' ? 'en' : 'sv',
+    trialExpires: /^\d{4}-\d{2}-\d{2}$/.test(p['tuya-trial-expires']?.trim() ?? '') ? p['tuya-trial-expires'].trim() : null,
   };
   cfgCache = { at: Date.now(), cfg };
   return cfg;
@@ -264,6 +265,36 @@ async function notify(cfg, { title, body, priority = 3, tags = [] }) {
   }
 }
 
+// MARK: - Trial reminder
+
+/** Days before the IoT Core trial ends to send a reminder. Tuya has no API to extend it, so it's done by hand. */
+const TRIAL_REMIND_DAYS = [14, 3, 0];
+
+/** One reminder per step in TRIAL_REMIND_DAYS, in daytime only. A new date (after extending) starts over. */
+async function trialReminder(cfg, meta) {
+  const date = cfg.trialExpires;
+  if (!date) return;
+  const now = new Date();
+  const hour = Number(new Intl.DateTimeFormat('sv-SE', { timeZone: TZ, hour: '2-digit', hourCycle: 'h23' }).format(now));
+  if (hour < 9 || hour >= 21) return;
+  const today = now.toLocaleDateString('sv-SE', { timeZone: TZ });
+  const daysLeft = Math.round((Date.parse(date) - Date.parse(today)) / 86_400_000);
+  if (daysLeft < 0) return; // already expired: the "no readings" alarm takes over
+  const step = Math.min(...TRIAL_REMIND_DAYS.filter((d) => daysLeft <= d));
+  if (!Number.isFinite(step)) return;
+  if (meta.trialReminder?.date === date && meta.trialReminder.step <= step) return;
+  const when = daysLeft === 0 ? L('idag', 'today')
+    : daysLeft === 1 ? L('imorgon', 'tomorrow') : L(`om ${daysLeft} dagar`, `in ${daysLeft} days`);
+  const ok = await notify(cfg, {
+    title: L(`Provperioden för IoT Core går ut ${when}`, `The IoT Core trial expires ${when}`),
+    body: L(`Den går ut ${date}. Förläng den under Cloud → Cloud Services på https://platform.tuya.com och spara sedan det nya datumet med ./setup-params.sh.`,
+      `It expires on ${date}. Extend it under Cloud → Cloud Services at https://platform.tuya.com, then save the new date with ./setup-params.sh.`),
+    priority: 4,
+    tags: ['calendar'],
+  });
+  if (ok) meta.trialReminder = { date, step };
+}
+
 // MARK: - Formatting
 
 const TZ = 'Europe/Stockholm';
@@ -350,6 +381,7 @@ async function poll() {
   const meta = (await getItem('META')) ?? { pk: 'META', sk: 0 };
   meta.devices ??= {};
   meta.alarms ??= {};
+  await trialReminder(cfg, meta);
 
   let list;
   try {
@@ -483,6 +515,7 @@ async function http(event) {
       fetchedAt: meta.fetchedAt ?? null,
       tuyaError: meta.tuyaError ?? null,
       tuyaFailingSince: meta.tuyaFailingSince ?? null,
+      trialExpires: cfg.trialExpires,
       plugs,
     });
   }

@@ -35,6 +35,15 @@ Same rules as the app: below `minWatts` for `hours` of observed readings, or off
 of more than 20 minutes between readings restarts the count. One notification is sent when an alarm starts and one
 when it ends. If Tuya fails for 30 minutes (for example when the IoT Core trial has expired), that alarms too.
 
+Tuya has no API for extending the IoT Core trial, so it has to be done by hand in the console. To get a warning
+before it lapses, save the expiry date as `tuya-trial-expires` (`./setup-params.sh` asks for it). The function then
+sends an ntfy reminder 14, 3 and 0 days before, between 09 and 21 Swedish time. After extending, save the new date
+and the reminders start over:
+
+```bash
+aws ssm put-parameter --name /torpet-el/tuya-trial-expires --type String --overwrite --value 2027-05-01 --profile personal
+```
+
 Differences from the app:
 - The alarm periods are built up one reading at a time, so changed settings apply from the next reading instead of
   being recalculated over earlier readings.
@@ -51,6 +60,7 @@ Differences from the app:
 | `ntfy-server`, `ntfy-token` | optional | Your own ntfy server and its access token |
 | `api-key` | SecureString | Key the Mac app sends as `Authorization: Bearer <key>` |
 | `language` | optional | `en` for English notifications, Swedish otherwise |
+| `tuya-trial-expires` | optional | `YYYY-MM-DD` when the IoT Core trial ends; reminders are sent 14, 3 and 0 days before |
 
 ## API for the Mac app
 
@@ -63,7 +73,7 @@ Times are Unix seconds.
 `GET /status`:
 
 ```json
-{ "fetchedAt": 1793468100, "tuyaError": null, "tuyaFailingSince": null,
+{ "fetchedAt": 1793468100, "tuyaError": null, "tuyaFailingSince": null, "trialExpires": "2027-05-01",
   "plugs": [{ "id": "…", "name": "Frysen", "product": "…", "online": true, "isOn": true,
               "power": 84, "voltage": 230.1, "current": 0.37,
               "watch": { "enabled": true, "minWatts": 10, "hours": 3, "offlineAlarm": true, "offlineMinutes": 30 },
