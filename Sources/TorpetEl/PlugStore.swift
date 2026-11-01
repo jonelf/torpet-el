@@ -24,11 +24,15 @@ enum ChartSpan: String, CaseIterable, Identifiable, Sendable {
 }
 
 struct ChartPoint: Identifiable, Sendable {
+    let plugID: String
+    let plugName: String
     let date: Date
     let power: Double
     /// Ny del efter ett glapp, så linjen inte dras över tid utan mätningar.
     let segment: Int
-    var id: Date { date }
+    var id: String { "\(plugID)|\(date.timeIntervalSince1970)" }
+    /// En linje per plugg och del.
+    var series: String { "\(plugID)|\(segment)" }
 }
 
 @MainActor
@@ -101,8 +105,10 @@ final class PlugStore: ObservableObject {
             fetchedAt = snap.fetchedAt.map { Date(timeIntervalSince1970: $0) }
             error = cloudProblem(snap)
 
-            if chartPlugID == nil || !plugs.contains(where: { $0.id == chartPlugID }) {
-                chartPlugID = (plugs.first { watch[$0.id]?.enabled == true && $0.hasMeter } ?? plugs.first { $0.hasMeter })?.id
+            if chartPlugID == nil || (!chartShowsAll && !plugs.contains(where: { $0.id == chartPlugID })) {
+                // Alla pluggar i samma diagram som standard, om det finns fler än en att jämföra.
+                let metered = plugs.filter(\.hasMeter)
+                chartPlugID = metered.count > 1 ? Self.allPlugs : metered.first?.id
             }
             notifyTransitions()
             await loadChart()
@@ -199,20 +205,37 @@ final class PlugStore: ObservableObject {
 
     // MARK: Diagram
 
+    /// Värde för `chartPlugID` som visar alla pluggar med elmätare i samma diagram.
+    static let allPlugs = "*all*"
+
+    var chartShowsAll: Bool { chartPlugID == Self.allPlugs }
+
+    /// Pluggarna som diagrammet visar just nu.
+    var chartPlugIDs: [String] {
+        guard let id = chartPlugID else { return [] }
+        return id == Self.allPlugs ? plugs.filter(\.hasMeter).map(\.id) : [id]
+    }
+
+    /// Larmgränsen för diagrammet. Bara när en plugg visas, eftersom pluggarna kan ha olika gränser.
     var chartConfig: WatchConfig? {
-        guard let id = chartPlugID, let p = plugs.first(where: { $0.id == id }) else { return nil }
+        guard !chartShowsAll, let id = chartPlugID, let p = plugs.first(where: { $0.id == id }) else { return nil }
         return config(for: p)
     }
 
-    /// Hämtar bara det som saknas: nya mätningar sedan förra gången, eller äldre om tidsspannet blivit längre.
     func loadChart() async {
-        guard let id = chartPlugID else { return }
+        let ids = chartPlugIDs
+        guard !ids.isEmpty else { return }
+        chartLoading = true
+        defer { chartLoading = false }
+        for id in ids { await loadChart(id) }
+    }
+
+    /// Hämtar bara det som saknas: nya mätningar sedan förra gången, eller äldre om tidsspannet blivit längre.
+    private func loadChart(_ id: String) async {
         let from = Date().addingTimeInterval(-chartSpan.seconds)
         let have = chartSamples[id] ?? []
         // Redan hämtat från `from` eller tidigare: bara det nya behövs.
         let last = chartFrom[id].flatMap { $0 <= from ? have.last : nil }
-        chartLoading = true
-        defer { chartLoading = false }
         do {
             if let last {
                 let weekAgo = Date().addingTimeInterval(-ChartSpan.week.seconds)
@@ -228,7 +251,11 @@ final class PlugStore: ObservableObject {
     }
 
     func chartPoints(now: Date = Date()) -> [ChartPoint] {
-        guard let id = chartPlugID else { return [] }
+        chartPlugIDs.flatMap { chartPoints(for: $0, now: now) }
+    }
+
+    private func chartPoints(for id: String, now: Date) -> [ChartPoint] {
+        let name = plugs.first { $0.id == id }?.name ?? id
         let from = now.addingTimeInterval(-chartSpan.seconds)
         var out: [ChartPoint] = []
         var segment = 0
@@ -236,7 +263,7 @@ final class PlugStore: ObservableObject {
         for s in chartSamples[id] ?? [] where s.date >= from {
             guard s.online, let w = s.power else { prev = nil; continue }
             if !out.isEmpty && (prev == nil || s.date.timeIntervalSince(prev!) > Alarm.maxGap) { segment += 1 }
-            out.append(ChartPoint(date: s.date, power: w, segment: segment))
+            out.append(ChartPoint(plugID: id, plugName: name, date: s.date, power: w, segment: segment))
             prev = s.date
         }
         return out

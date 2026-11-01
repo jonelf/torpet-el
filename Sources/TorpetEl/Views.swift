@@ -254,6 +254,10 @@ private struct PowerChart: View {
                     Text(L.t("Effekt", "Power")).font(.subheadline.weight(.semibold))
                     Spacer()
                     Picker("", selection: $store.chartPlugID) {
+                        if metered.count > 1 {
+                            Text(L.t("Alla", "All")).tag(Optional(PlugStore.allPlugs))
+                            Divider()
+                        }
                         ForEach(metered) { Text($0.name).tag(Optional($0.id)) }
                     }
                     .labelsHidden().fixedSize()
@@ -264,7 +268,7 @@ private struct PowerChart: View {
                 .pickerStyle(.segmented).labelsHidden()
 
                 ZStack {
-                    chart(pts).frame(height: 160)
+                    chart(pts, plugs: metered).frame(height: store.chartShowsAll ? 180 : 160)
                     if pts.isEmpty {
                         if store.chartLoading {
                             ProgressView().controlSize(.small)
@@ -280,13 +284,22 @@ private struct PowerChart: View {
         }
     }
 
-    private func chart(_ pts: [ChartPoint]) -> some View {
+    /// Färger för "Alla", i pluggarnas ordning. Orange först, som när en plugg visas ensam.
+    private static let colors: [Color] = [.orange, .blue, .green, .purple, .pink, .teal, .brown]
+
+    private func chart(_ pts: [ChartPoint], plugs: [Plug]) -> some View {
         let now = Date()
         let limit = store.chartConfig.flatMap { $0.enabled ? $0.minWatts : nil }
+        let names = plugs.map(\.name)
         return Chart {
             ForEach(pts) { p in
-                LineMark(x: .value("Tid", p.date), y: .value("W", p.power), series: .value("Del", p.segment))
-                    .foregroundStyle(.orange)
+                if store.chartShowsAll {
+                    LineMark(x: .value("Tid", p.date), y: .value("W", p.power), series: .value("Del", p.series))
+                        .foregroundStyle(by: .value(L.t("Plugg", "Plug"), p.plugName))
+                } else {
+                    LineMark(x: .value("Tid", p.date), y: .value("W", p.power), series: .value("Del", p.series))
+                        .foregroundStyle(.orange)
+                }
             }
             if let limit {
                 RuleMark(y: .value(L.t("Gräns", "Limit"), limit))
@@ -294,6 +307,8 @@ private struct PowerChart: View {
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
             }
         }
+        .chartForegroundStyleScale(domain: names, range: names.indices.map { Self.colors[$0 % Self.colors.count] })
+        .chartLegend(store.chartShowsAll ? .visible : .hidden)
         .chartXScale(domain: now.addingTimeInterval(-store.chartSpan.seconds)...now)
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { v in
@@ -319,6 +334,13 @@ private struct PowerChart: View {
 
     /// Min, max och medel, och hur stor del av mätningarna som låg över gränsen (för en frys: hur mycket kompressorn går).
     private func summary(_ pts: [ChartPoint]) -> some View {
+        if store.chartShowsAll {
+            // Medel per plugg; min och max säger lite när kurvorna ligger i samma diagram.
+            let parts = Dictionary(grouping: pts, by: \.plugName)
+                .sorted { $0.key.localizedStandardCompare($1.key) == .orderedAscending }
+                .map { name, ps in "\(name) " + L.t("medel ", "average ") + Fmt.watts(ps.map(\.power).reduce(0, +) / Double(ps.count)) }
+            return Text(parts.joined(separator: "  ·  ")).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+        }
         let values = pts.map(\.power)
         let avg = values.reduce(0, +) / Double(values.count)
         var parts = ["Min \(Fmt.watts(values.min()))", "Max \(Fmt.watts(values.max()))", L.t("Medel ", "Average ") + Fmt.watts(avg)]

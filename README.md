@@ -4,7 +4,7 @@ A macOS menu bar app that watches the Tuya/Smart Life smart plugs at our summer 
 alarm when a freezer stops drawing power. The watching itself runs in AWS (see [cloud/](cloud/README.md)), so alarms
 reach your phone through ntfy even when the Mac is asleep or off. The app shows what the cloud sees.
 
-<p align="center"><img src="docs/screenshot.png" width="420" alt="Torpet El menu bar window with three plugs and a power chart"></p>
+<p align="center"><img src="docs/screenshot.png" width="420" alt="Torpet El menu bar window with three plugs and a power chart showing both freezers"></p>
 
 The menu bar shows the watched plugs' current power, for example `⚡ 84 W  63 W`, and switches to `⚠` and the
 plug's name when something is wrong. Click it to see:
@@ -12,8 +12,9 @@ plug's name when something is wrong. Click it to see:
 - **Every plug**: on/off switch, online status, power, voltage and current.
 - **Alarm settings** per plug: below how many watts it counts as having no power, how long it may stay that way,
   and whether to alarm when the plug goes offline (power cut, tripped fuse, network down at the cottage).
-- **A power chart** for the last 6 hours, day or week, with the alarm limit and how much of the time the
-  compressor ran.
+- **A power chart** for the last 6 hours, day or week. By default it shows every plug with power metering in
+  its own color, with each plug's average power. Pick a single plug to see its alarm limit and how much of the time
+  the compressor ran.
 
 Alarms are sent to the phone through ntfy and as macOS notifications, and again when the plug recovers.
 
@@ -54,8 +55,8 @@ settings to check that they arrive.
    and **Access Secret**, and prints an ntfy topic to subscribe to on the phone and an API key.
 5. Paste the Function URL and API key into the app's settings.
 
-The free IoT Core trial has to be extended now and then under **Cloud → Cloud Services**; you get an alarm when it
-expires. The URL and key are stored in `~/Library/Application Support/TorpetEl/cloud.json` (readable only by you).
+The free IoT Core trial has to be extended now and then under **Cloud → Cloud Services**. Save its expiry date with
+`cloud/setup-params.sh` to get reminders before it runs out; you get an alarm if it expires anyway. The URL and key are stored in `~/Library/Application Support/TorpetEl/cloud.json` (readable only by you).
 
 ## Files
 
