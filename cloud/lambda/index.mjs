@@ -181,8 +181,14 @@ function toPlug(d, scales) {
     const raw = num(st[code]);
     return raw == null ? null : raw / 10 ** (scales[code]?.scale ?? def);
   };
+  // Some plugs (Utomhus) have a spec that says scale 0 for the voltage, which gives e.g. 2380 V. Mains is never above ~300 V.
+  let volts = scaled('cur_voltage', 1);
+  if (volts != null && volts > 1000) volts /= 10;
   let amps = scaled('cur_current', 0);
   if (amps != null && (scales.cur_current?.unit ?? 'mA').toLowerCase() === 'ma') amps /= 1000;
+  // Same spec problem for the power: more watts than volts × amps is impossible, so the scale is off by ten.
+  let watts = scaled('cur_power', 1);
+  if (watts != null && volts != null && amps != null && amps > 0 && watts > volts * amps * 1.1) watts /= 10;
   return {
     id: d.id,
     name: d.name ?? d.id,
@@ -190,8 +196,8 @@ function toPlug(d, scales) {
     online: d.online ?? false,
     isOn: bool(st.switch_1) ?? bool(st.switch),
     switchCode: 'switch_1' in st ? 'switch_1' : 'switch' in st ? 'switch' : null,
-    power: scaled('cur_power', 1),
-    voltage: scaled('cur_voltage', 1),
+    power: watts,
+    voltage: volts,
     current: amps,
   };
 }
