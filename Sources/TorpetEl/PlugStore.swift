@@ -275,9 +275,16 @@ final class PlugStore: ObservableObject {
         if plugs.isEmpty { return needsSetup ? "Torpet –" : "Torpet …" }
         let alarmed = plugs.filter { status[$0.id]?.idleAlarm == true || status[$0.id]?.offlineAlarm == true }
         if !alarmed.isEmpty { return alarmed.map(\.name).joined(separator: ", ") }
+        // Bara frysar som går just nu visar watt; står alla still syns bara blixten.
         let watched = plugs.filter { config(for: $0).enabled && $0.hasMeter }
-        if !watched.isEmpty { return watched.map { Fmt.watts($0.online ? $0.power : nil) }.joined(separator: "  ") }
-        return Fmt.watts(plugs.filter(\.online).compactMap(\.power).reduce(0, +))
+        if !watched.isEmpty {
+            return watched
+                .filter { $0.online && ($0.power ?? 0) >= config(for: $0).minWatts }
+                .map { Fmt.watts($0.power) }
+                .joined(separator: "  ")
+        }
+        let total = plugs.filter(\.online).compactMap(\.power).reduce(0, +)
+        return total > 0 ? Fmt.watts(total) : ""
     }
 
     // MARK: Inställningar

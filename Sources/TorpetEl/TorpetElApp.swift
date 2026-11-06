@@ -9,7 +9,7 @@ struct TorpetElApp: App {
         } label: {
             HStack(spacing: 3) {
                 Image(systemName: store.anyAlarm ? "exclamationmark.triangle.fill" : "bolt.fill")
-                Text(store.menuTitle).monospacedDigit()
+                if !store.menuTitle.isEmpty { Text(store.menuTitle).monospacedDigit() }
             }
             .task { store.start() }
         }
