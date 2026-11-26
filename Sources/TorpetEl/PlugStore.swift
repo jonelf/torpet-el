@@ -55,9 +55,11 @@ struct RunBand: Identifiable, Sendable {
 }
 
 struct EnergyBucket: Identifiable, Sendable {
+    /// Whose energy: the heat pump's or a plug's name.
+    let source: String
     let date: Date
     let kwh: Double
-    var id: Date { date }
+    var id: String { "\(source)|\(date.timeIntervalSince1970)" }
 }
 
 struct ChartPoint: Identifiable, Sendable {
@@ -440,6 +442,8 @@ final class PlugStore: ObservableObject {
                     heatSamples = try await client.heatSamples(unit: hp.id, since: from)
                 } else {
                     energyHours = try await client.heatEnergy(unit: hp.id, since: from)
+                    // The plugs' energy is worked out from their power readings.
+                    for p in plugs where p.hasMeter { await loadChart(p.id) }
                 }
             } catch {
                 // As for the power chart: it tries again at the next refresh.
@@ -529,15 +533,45 @@ final class PlugStore: ObservableObject {
         return (points, bands)
     }
 
-    /// Energy per hour, or per day for the week view.
+    /// The heat pump's measured energy and the metered plugs' estimated energy, per hour or per day for the week view.
     func energyBuckets(now: Date = Date()) -> [EnergyBucket] {
         let from = now.addingTimeInterval(-chartSpan.seconds)
         let cal = Calendar.current
-        let hours = energyHours.filter { $0.date >= from }
-        guard chartSpan == .week else { return hours.map { EnergyBucket(date: $0.date, kwh: $0.kwh) } }
-        return Dictionary(grouping: hours) { cal.startOfDay(for: $0.date) }
-            .map { EnergyBucket(date: $0.key, kwh: $0.value.reduce(0) { $0 + $1.kwh }) }
-            .sorted { $0.date < $1.date }
+        let step: Calendar.Component = chartSpan == .week ? .day : .hour
+        func start(_ d: Date) -> Date { cal.dateInterval(of: step, for: d)?.start ?? d }
+        var sums: [String: [Date: Double]] = [:]
+        if let hp = chartHeat {
+            for h in energyHours where h.date >= from { sums[hp.name, default: [:]][start(h.date), default: 0] += h.kwh }
+        }
+        for p in plugs where p.hasMeter {
+            for (date, kwh) in Self.plugEnergy(chartSamples[p.id] ?? [], until: now) where date >= from {
+                sums[p.name, default: [:]][start(date), default: 0] += kwh
+            }
+        }
+        // Swift Charts stacks the first source at the bottom. Ordered by their total over the period, the biggest one
+        // is at the bottom and the smallest on top, the same in every bar.
+        return sums.sorted { $0.value.values.reduce(0, +) > $1.value.values.reduce(0, +) }
+            .flatMap { source, byTime in
+                byTime.sorted { $0.key < $1.key }.map { EnergyBucket(source: source, date: $0.key, kwh: $0.value) }
+            }
+    }
+
+    /// Estimated kWh per reading: each power reading stands for the time until the next one, at most 10 minutes.
+    /// Readings where the plug was offline or gave no power count as nothing.
+    private static func plugEnergy(_ samples: [Sample], until now: Date) -> [(Date, Double)] {
+        var out: [(Date, Double)] = []
+        for (i, s) in samples.enumerated() {
+            guard s.online, let w = s.power else { continue }
+            let next = i + 1 < samples.count ? samples[i + 1].date : now
+            let seconds = min(max(next.timeIntervalSince(s.date), 0), 600)
+            out.append((s.date, w * seconds / 3_600_000))
+        }
+        return out
+    }
+
+    /// Sources in the energy chart, in a fixed order so their colors don't move: the heat pump first, then the plugs.
+    var energySources: [String] {
+        (chartHeat.map { [$0.name] } ?? []) + plugs.filter(\.hasMeter).map(\.name)
     }
 
     // MARK: Menyraden

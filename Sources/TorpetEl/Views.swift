@@ -581,6 +581,90 @@ private func chartAxisLabel(_ d: Date, span: ChartSpan) -> String {
         : d.formatted(.dateTime.hour().minute().locale(Fmt.locale))
 }
 
+// MARK: - Helskärm
+
+/// The height of a chart: one fixed height in the popover (the same for all three charts, so switching between them
+/// doesn't move the page), and `nil` in the big window, where the chart takes all the room there is.
+private struct ChartHeightKey: EnvironmentKey { static let defaultValue: CGFloat? = 320 }
+
+private extension EnvironmentValues {
+    var chartHeight: CGFloat? {
+        get { self[ChartHeightKey.self] }
+        set { self[ChartHeightKey.self] = newValue }
+    }
+}
+
+/// Sizes a chart. In the popover a click on it opens the big window.
+private struct ChartBox: ViewModifier {
+    @Environment(\.chartHeight) private var height
+    let store: PlugStore
+
+    func body(content: Content) -> some View {
+        if let height {
+            content.frame(height: height)
+                .contentShape(Rectangle())
+                .onTapGesture { ChartWindow.shared.show(store: store) }
+                .help(L.t("Klicka för att visa diagrammet stort", "Click to show the chart large"))
+        } else {
+            content.frame(minHeight: 240, maxHeight: .infinity)
+        }
+    }
+}
+
+private struct FullChartView: View {
+    @ObservedObject var store: PlugStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            PowerChart(store: store)
+            // Esc closes the window.
+            Button("") { ChartWindow.shared.close() }.keyboardShortcut(.escape, modifiers: []).opacity(0).frame(width: 0, height: 0)
+        }
+        .environment(\.chartHeight, nil)
+        .padding(20)
+        .frame(minWidth: 640, minHeight: 480)
+        .id(store.language)
+    }
+}
+
+/// The charts in a window of their own, as large as the screen allows. The window's green button goes on to real full screen.
+@MainActor
+final class ChartWindow {
+    static let shared = ChartWindow()
+    private var window: NSWindow?
+
+    func show(store: PlugStore) {
+        if window == nil {
+            let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+                             styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            w.title = "Torpet El"
+            w.contentView = NSHostingView(rootView: FullChartView(store: store))
+            w.isReleasedWhenClosed = false
+            w.collectionBehavior = [.fullScreenPrimary]
+            if let f = NSScreen.main?.visibleFrame { w.setFrame(f, display: true) }
+            NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: w, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.window = nil
+                    // Back to a menu bar app without a Dock icon.
+                    NSApp.setActivationPolicy(.accessory)
+                }
+            }
+            window = w
+        }
+        // A menu bar app isn't allowed to bring a window in front of the other apps. While the window is open it is a
+        // regular app (with a Dock icon), and the window is raised once the popover has gone away.
+        NSApp.setActivationPolicy(.regular)
+        DispatchQueue.main.async { [weak self] in
+            guard let w = self?.window else { return }
+            NSApp.activate(ignoringOtherApps: true)
+            w.makeKeyAndOrderFront(nil)
+            w.orderFrontRegardless()
+        }
+    }
+
+    func close() { window?.close() }
+}
+
 private struct PowerChart: View {
     @ObservedObject var store: PlugStore
 
@@ -625,7 +709,7 @@ private struct PowerChart: View {
             SpanPicker(store: store)
 
             ZStack {
-                chart(pts, plugs: metered).frame(height: store.chartShowsAll ? 180 : 160)
+                chart(pts, plugs: metered).modifier(ChartBox(store: store))
                 if pts.isEmpty {
                     if store.chartLoading {
                         ProgressView().controlSize(.small)
@@ -721,7 +805,7 @@ private struct HeatTempChart: View {
             }
             SpanPicker(store: store)
             ZStack {
-                chart(pts, bands, now: now).frame(height: 160)
+                chart(pts, bands, now: now).modifier(ChartBox(store: store))
                 if pts.isEmpty {
                     if store.chartLoading {
                         ProgressView().controlSize(.small)
@@ -795,11 +879,15 @@ private struct HeatTempChart: View {
 
 private struct HeatEnergyChart: View {
     @ObservedObject var store: PlugStore
+    /// The heat pump first, in a color the power chart doesn't use, then the plugs in the same order and colors as there,
+    /// so a freezer keeps its color when you switch chart.
+    private static let colors: [Color] = [.yellow, .orange, .blue, .green, .purple, .pink, .teal, .brown]
 
     var body: some View {
         let now = Date()
         let buckets = store.energyBuckets(now: now)
         let unit: Calendar.Component = store.chartSpan == .week ? .day : .hour
+        let sources = store.energySources
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text(L.t("Energi", "Energy")).font(.subheadline.weight(.semibold))
@@ -810,8 +898,10 @@ private struct HeatEnergyChart: View {
             ZStack {
                 Chart(buckets) { b in
                     BarMark(x: .value("Tid", b.date, unit: unit), y: .value("kWh", b.kwh))
-                        .foregroundStyle(.indigo)
+                        .foregroundStyle(by: .value(L.t("Källa", "Source"), b.source))
                 }
+                .chartForegroundStyleScale(domain: sources, range: sources.indices.map { Self.colors[$0 % Self.colors.count] })
+                .chartLegend(.visible)
                 .chartXScale(domain: now.addingTimeInterval(-store.chartSpan.seconds)...now)
                 .chartXAxis {
                     AxisMarks(values: .automatic(desiredCount: 4)) { v in
@@ -824,10 +914,10 @@ private struct HeatEnergyChart: View {
                 .chartYAxis {
                     AxisMarks { v in
                         AxisGridLine()
-                        AxisValueLabel { if let d = v.as(Double.self) { Text(Fmt.num(d, decimals: d < 10 ? 1 : 0)) } }
+                        AxisValueLabel { if let d = v.as(Double.self) { Text(Fmt.num(d, decimals: d < 10 ? 1 : 0) + " kWh") } }
                     }
                 }
-                .frame(height: 160)
+                .modifier(ChartBox(store: store))
                 if buckets.isEmpty {
                     if store.chartLoading {
                         ProgressView().controlSize(.small)
@@ -838,10 +928,15 @@ private struct HeatEnergyChart: View {
                 }
             }
             if !buckets.isEmpty {
-                let total = buckets.reduce(0) { $0 + $1.kwh }
-                Text(L.t("Totalt ", "Total ") + Fmt.kwh(total) + L.t(" · kWh per ", " · kWh per ")
-                     + (store.chartSpan == .week ? L.t("dag", "day") : L.t("timme", "hour")))
-                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                let totals = Dictionary(grouping: buckets, by: \.source).mapValues { $0.reduce(0) { $0 + $1.kwh } }
+                let parts = sources.compactMap { s in totals[s].map { "\(s) \(Fmt.kwh($0))" } }
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(L.t("Totalt ", "Total ") + Fmt.kwh(totals.values.reduce(0, +)) + "  ·  " + parts.joined(separator: "  ·  "))
+                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    Text(L.t("Värmepumpens energi är mätt av MELCloud. Pluggarnas är uppskattad från effektmätningarna.",
+                             "The heat pump's energy is measured by MELCloud. The plugs' is estimated from their power readings."))
+                        .font(.caption2).foregroundStyle(.tertiary)
+                }
             }
         }
     }
