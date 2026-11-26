@@ -3,3 +3,5 @@ build/
 .env
 .DS_Store
 .swiftpm/
+icon/torpet.jpg
+icon/icon.png

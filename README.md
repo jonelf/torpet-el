@@ -41,6 +41,10 @@ get alarms that aren't real.
 ./build.sh install    # copies it to ~/Applications and launches it
 ```
 
+The app icon is drawn in code by `icon/make_icon.swift` on top of a photo of the cottage, `icon/torpet.jpg`. The
+photo is kept out of the repo, so only `icon/AppIcon.icns` is committed; to change the icon, put a square photo there
+and run `icon/make_icon.sh`.
+
 Requires macOS 14 or later and Xcode or the Command Line Tools. Launch at login is in the settings. macOS asks
 for permission to show notifications the first time the app starts; say yes, and use **Test notification** in the
 settings to check that they arrive.
