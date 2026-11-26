@@ -30,6 +30,13 @@ while :; do
 done
 
 echo
+echo "MELCloud Home, for the heat pump (optional: press Enter to skip or keep)"
+read -r -p "  Username (email) [$(current melcloud-username)]: " mcuser
+[ -n "$mcuser" ] && put melcloud-username String "$mcuser"
+read -r -s -p "  Password (hidden, Enter keeps current): " mcpass; echo
+[ -n "$mcpass" ] && put melcloud-password SecureString "$mcpass"
+
+echo
 topic="$(current ntfy-topic)"
 if [ -z "$topic" ]; then
   topic="torpet-el-$(random 16)"

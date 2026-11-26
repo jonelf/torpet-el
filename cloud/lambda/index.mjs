@@ -10,6 +10,7 @@ import {
   BatchGetCommand, BatchWriteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { GetParametersByPathCommand, SSMClient } from '@aws-sdk/client-ssm';
+import { pollHeatPump } from './heatpump.mjs';
 
 const TABLE = process.env.TABLE;
 const PARAM_PATH = process.env.PARAM_PATH ?? '/torpet-el';
@@ -58,6 +59,8 @@ async function config() {
     ntfyTopic: p['ntfy-topic'],
     ntfyToken: p['ntfy-token'],
     apiKey: p['api-key'],
+    melcloudUser: p['melcloud-username']?.trim(),
+    melcloudPassword: p['melcloud-password'],
     lang: p.language === 'en' ? 'en' : 'sv',
     trialExpires: /^\d{4}-\d{2}-\d{2}$/.test(p['tuya-trial-expires']?.trim() ?? '') ? p['tuya-trial-expires'].trim() : null,
   };
@@ -326,6 +329,7 @@ function fmtWatts(w) {
 // WATCH#<id> / 0   alarm settings for a plug (written by the Mac app, so they're kept apart from META)
 // S#<id> / <unix seconds>   one reading, deleted by TTL after KEEP_DAYS
 // TOKEN / 0   cached Tuya token
+// HP / 0, MELCLOUD / 0, H#<id> / <unix s>, E#<id> / <unix s>   the heat pump: see heatpump.mjs
 
 async function getItem(pk) {
   return (await db.send(new GetCommand({ TableName: TABLE, Key: { pk, sk: 0 } }))).Item;
@@ -333,6 +337,23 @@ async function getItem(pk) {
 
 async function putItem(item) {
   await db.send(new PutCommand({ TableName: TABLE, Item: item }));
+}
+
+/** Every item of a partition from `since` on, in time order. */
+async function queryFrom(pk, since) {
+  const out = [];
+  let ExclusiveStartKey;
+  do {
+    const r = await db.send(new QueryCommand({
+      TableName: TABLE,
+      KeyConditionExpression: 'pk = :pk AND sk >= :since',
+      ExpressionAttributeValues: { ':pk': pk, ':since': since },
+      ExclusiveStartKey,
+    }));
+    out.push(...(r.Items ?? []));
+    ExclusiveStartKey = r.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return out;
 }
 
 async function loadWatches(ids, names) {
@@ -379,6 +400,13 @@ async function writeAll(items) {
 async function poll() {
   const cfg = await config();
   lang = cfg.lang;
+  // The freezers come first and a failure in one part never stops the other.
+  await pollTuya(cfg).catch((e) => console.error('Tuya poll:', e));
+  const now = Math.floor(Date.now() / 1000);
+  await pollHeatPump({ cfg, now, ttl: now + KEEP_DAYS * 86_400, getItem, putItem, writeAll });
+}
+
+async function pollTuya(cfg) {
   if (!cfg.accessId || !cfg.secret || !cfg.host) {
     console.error(`Tuya credentials are missing under ${PARAM_PATH} in Parameter Store`);
     return;
@@ -498,6 +526,7 @@ async function http(event) {
 
   if (method === 'GET' && path === '/status') {
     const meta = (await getItem('META')) ?? { devices: {}, alarms: {} };
+    const hp = await getItem('HP');
     const ids = Object.keys(meta.devices ?? {});
     const watches = ids.length ? await loadWatches(ids, Object.fromEntries(ids.map((id) => [id, meta.devices[id].name]))) : {};
     const plugs = ids.map((id) => {
@@ -523,6 +552,10 @@ async function http(event) {
       tuyaFailingSince: meta.tuyaFailingSince ?? null,
       trialExpires: cfg.trialExpires,
       plugs,
+      heatPumps: Object.values(hp?.units ?? {}).map((u) => u.latest).sort((a, b) => a.name.localeCompare(b.name, 'sv')),
+      heatPumpFetchedAt: hp?.fetchedAt ?? null,
+      heatPumpError: hp?.error ?? null,
+      heatPumpFailingSince: hp?.failingSince ?? null,
     });
   }
 
@@ -545,6 +578,24 @@ async function http(event) {
       ExclusiveStartKey = r.LastEvaluatedKey;
     } while (ExclusiveStartKey);
     return json(200, { device: q.device, since, samples: out });
+  }
+
+  if (method === 'GET' && (path === '/heatpump/samples' || path === '/heatpump/energy')) {
+    const q = event.queryStringParameters ?? {};
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(q.unit ?? '')) return json(400, { error: 'unit is required' });
+    const energy = path.endsWith('/energy');
+    const since = Math.max(Number(q.since) || now - 86_400, now - KEEP_DAYS * 86_400);
+    const items = await queryFrom(`${energy ? 'E' : 'H'}#${q.unit}`, since);
+    return json(200, energy
+      ? { unit: q.unit, since, hours: items.map((it) => ({ t: it.sk, kwh: it.kwh })) }
+      : {
+        unit: q.unit,
+        since,
+        samples: items.map((it) => ({
+          t: it.sk, room: it.room ?? null, set: it.set ?? null, mode: it.mode ?? null, power: it.power ?? null,
+          rssi: it.rssi ?? null, connected: it.connected ?? null, error: it.error ?? null,
+        })),
+      });
   }
 
   const m = path.match(/^\/watch\/([A-Za-z0-9_-]{1,64})$/);

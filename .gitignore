@@ -5,3 +5,4 @@ build/
 .swiftpm/
 icon/torpet.jpg
 icon/icon.png
+node_modules/

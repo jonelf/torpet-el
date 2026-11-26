@@ -74,12 +74,13 @@ Resources:
     DependsOn: LogGroup
     Properties:
       FunctionName: torpet-el
-      Description: Polls Tuya plugs, stores readings, sends ntfy alarms, serves the Mac app
+      Description: Polls Tuya plugs and the MELCloud heat pump, stores readings, sends ntfy alarms, serves the Mac app
       Runtime: nodejs22.x
       Architectures: [arm64]
       Handler: index.handler
-      MemorySize: 128
-      Timeout: 30
+      MemorySize: 256
+      # The poll fetches Tuya, then MELCloud, whose reads can be retried with a few seconds of backoff.
+      Timeout: 60
       Role: !GetAtt FunctionRole.Arn
       Environment:
         Variables:

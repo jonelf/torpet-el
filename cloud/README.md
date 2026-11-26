@@ -15,6 +15,11 @@ aws login --profile personal   # the IAM user jonelf
 ./deploy.sh                    # stack + function code, prints the Function URL
 ```
 
+`deploy.sh` bundles the function together with the MELCloud library, which is published to GitHub Packages and needs a
+token to download: create a classic personal access token with only `read:packages` on the GitHub account that owns
+the repo, and `export NODE_AUTH_TOKEN=<token>` in the terminal before `./deploy.sh`. The token is only used on your
+machine and is never written to a file. The first run creates `package-lock.json`; commit it.
+
 Subscribe to the ntfy topic that `setup-params.sh` prints, in the ntfy app on your phone. Test it with:
 
 ```bash
@@ -60,6 +65,8 @@ Differences from the app:
 | `ntfy-server`, `ntfy-token` | optional | Your own ntfy server and its access token |
 | `api-key` | SecureString | Key the Mac app sends as `Authorization: Bearer <key>` |
 | `language` | optional | `en` for English notifications, Swedish otherwise |
+| `melcloud-username` | String | MELCloud Home account (optional: without it the heat pump is skipped) |
+| `melcloud-password` | SecureString | Its password. Never copied into the table |
 | `tuya-trial-expires` | optional | `YYYY-MM-DD` when the IoT Core trial ends; reminders are sent 14, 3 and 0 days before |
 
 ## API for the Mac app
@@ -89,6 +96,12 @@ The default is the last 24 hours, and readings are kept for 90 days.
 `POST /switch/<id>` with body `{ "on": true|false }` switches a plug on or off through Tuya. The Mac app asks for
 confirmation before switching off a watched plug.
 
+`GET /heatpump/samples?unit=<id>&since=<unix>` returns the heat pump's readings, one per poll:
+`{ "samples": [{ "t", "room", "set", "mode", "power", "rssi", "connected", "error" }] }`.
+`GET /heatpump/energy?unit=<id>&since=<unix>` returns `{ "hours": [{ "t", "kwh" }] }`, the energy used in each hour that
+starts at `t`. `/status` also has `heatPumps` (the latest state, frost protection and an active holiday mode),
+`heatPumpFetchedAt`, `heatPumpError` and `heatPumpFailingSince`.
+
 `POST /test` sends a test notification.
 
 ## Table `TorpetEl`
@@ -99,5 +112,9 @@ confirmation before switching off a watched plug.
 | `WATCH#<id>` | 0 | Alarm settings per plug |
 | `S#<id>` | Unix time | One reading, deleted by TTL |
 | `TOKEN` | 0 | Cached Tuya token |
+| `HP` | 0 | Heat pump: latest values, last fetch, MELCloud errors |
+| `MELCLOUD` | 0 | MELCloud session tokens (the password is not stored here) |
+| `H#<id>` | Unix time | One heat pump reading, deleted by TTL |
+| `E#<id>` | Unix time | Energy used in the hour starting then, kWh, deleted by TTL |
 
 The table is kept if the stack is deleted (`DeletionPolicy: Retain`).
