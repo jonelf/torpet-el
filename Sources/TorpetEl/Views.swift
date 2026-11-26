@@ -44,7 +44,7 @@ struct PopoverView: View {
             }
             if store.showSettings || store.needsSetup {
                 SettingsView(store: store)
-            } else if store.plugs.isEmpty {
+            } else if store.plugs.isEmpty && store.heatPumps.isEmpty {
                 if store.fetchedAt != nil {
                     Text(L.t("Inga enheter hittades. Kontrollera att Smart Life-kontot är länkat till molnprojektet (Devices → Link App Account).",
                              "No devices found. Check that the Smart Life account is linked to the cloud project (Devices → Link App Account)."))
@@ -55,6 +55,12 @@ struct PopoverView: View {
                 }
             } else {
                 ForEach(store.plugs) { PlugCard(store: store, plug: $0) }
+                if store.heatPumps.isEmpty, let e = store.heatPumpError {
+                    Label(e, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                ForEach(store.heatPumps) { HeatPumpCard(store: store, pump: $0) }
                 PowerChart(store: store)
             }
         }
@@ -240,47 +246,154 @@ private struct WatchEditor: View {
     }
 }
 
+// MARK: - Värmepump
+
+private struct HeatPumpCard: View {
+    @ObservedObject var store: PlugStore
+    let pump: HeatPump
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Label(pump.name, systemImage: "thermometer.medium").font(.subheadline.weight(.semibold))
+                Spacer()
+                if !pump.isConnected {
+                    Label(L.t("Ingen kontakt", "No contact"), systemImage: "wifi.slash").font(.caption).foregroundStyle(.orange)
+                } else if let r = pump.rssi {
+                    Image(systemName: "wifi", variableValue: min(max((r + 90) / 40, 0), 1))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .help("Wi-Fi \(Int(r)) dBm")
+                }
+                Text(pump.isOn ? L.t("På", "On") : L.t("Av", "Off")).font(.caption)
+                    .foregroundStyle(pump.isOn ? Color.green : Color.secondary)
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(Fmt.temp(pump.room, unit: false))
+                    .font(.system(size: 26, weight: .medium, design: .rounded)).monospacedDigit()
+                if pump.isOn {
+                    Text([Fmt.mode(pump.mode), L.t("mål ", "target ") + Fmt.temp(pump.set),
+                          L.t("fläkt ", "fan ") + Fmt.fan(pump.fan)].joined(separator: " · "))
+                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                }
+            }
+            if pump.hasError {
+                Label(pump.error ?? L.t("Värmepumpen rapporterar ett fel", "The heat pump reports a fault"),
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.red)
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                if let f = pump.frost, f.isEnabled {
+                    Label(L.t("Frostskydd håller ", "Frost protection holds ") + "\(Fmt.num(f.min, decimals: 0))–\(Fmt.num(f.max, decimals: 0)) °C",
+                          systemImage: "snowflake").foregroundStyle(.secondary)
+                } else {
+                    Label(L.t("Frostskydd är av", "Frost protection is off"), systemImage: "snowflake").foregroundStyle(.orange)
+                }
+                if let h = pump.holiday {
+                    Label(L.t("Semesterläge är på", "Holiday mode is on") + Self.until(h.endDate),
+                          systemImage: "calendar.badge.exclamationmark").foregroundStyle(.orange)
+                }
+                if let e = store.energyToday {
+                    Label(L.t("Idag ", "Today ") + Fmt.kwh(e), systemImage: "bolt").foregroundStyle(.secondary)
+                }
+                if let e = store.heatPumpError {
+                    Label(e, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .font(.caption)
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(pump.hasError ? AnyShapeStyle(Color.red.opacity(0.15)) : AnyShapeStyle(.quaternary.opacity(0.35)),
+                    in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    /// " till 30 nov 22:18" from the unit's wall-clock end date, or nothing if it can't be read.
+    private static func until(_ iso: String?) -> String {
+        guard let iso, iso.count >= 19 else { return "" }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        guard let d = f.date(from: String(iso.prefix(19))) else { return "" }
+        return L.t(" till ", " until ") + Fmt.time(d)
+    }
+}
+
 // MARK: - Diagram
+
+private struct SpanPicker: View {
+    @ObservedObject var store: PlugStore
+
+    var body: some View {
+        Picker("", selection: $store.chartSpan) {
+            ForEach(ChartSpan.allCases) { Text($0.label).tag($0) }
+        }
+        .pickerStyle(.segmented).labelsHidden()
+    }
+}
+
+private func chartAxisLabel(_ d: Date, span: ChartSpan) -> String {
+    span == .week
+        ? d.formatted(.dateTime.weekday(.abbreviated).locale(Fmt.locale))
+        : d.formatted(.dateTime.hour().minute().locale(Fmt.locale))
+}
 
 private struct PowerChart: View {
     @ObservedObject var store: PlugStore
 
     var body: some View {
         let metered = store.plugs.filter(\.hasMeter)
-        if !metered.isEmpty {
-            let pts = store.chartPoints()
+        let hasHeat = !store.heatPumps.isEmpty
+        if !metered.isEmpty || hasHeat {
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text(L.t("Effekt", "Power")).font(.subheadline.weight(.semibold))
-                    Spacer()
-                    Picker("", selection: $store.chartPlugID) {
-                        if metered.count > 1 {
-                            Text(L.t("Alla", "All")).tag(Optional(PlugStore.allPlugs))
-                            Divider()
-                        }
-                        ForEach(metered) { Text($0.name).tag(Optional($0.id)) }
-                    }
-                    .labelsHidden().fixedSize()
-                }
-                Picker("", selection: $store.chartSpan) {
-                    ForEach(ChartSpan.allCases) { Text($0.label).tag($0) }
-                }
-                .pickerStyle(.segmented).labelsHidden()
-
-                ZStack {
-                    chart(pts, plugs: metered).frame(height: store.chartShowsAll ? 180 : 160)
-                    if pts.isEmpty {
-                        if store.chartLoading {
-                            ProgressView().controlSize(.small)
-                        } else {
-                            Text(L.t("Ingen data än. Molnet sparar en mätning var 5:e minut.",
-                                     "No data yet. The cloud saves a reading every 5 minutes."))
-                                .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                if hasHeat {
+                    // Without any metered plug there is no power chart to pick.
+                    Picker("", selection: $store.chartKind) {
+                        ForEach(metered.isEmpty ? ChartKind.allCases.filter { $0 != .power } : ChartKind.allCases) {
+                            Text($0.label).tag($0)
                         }
                     }
+                    .pickerStyle(.segmented).labelsHidden()
                 }
-                if !pts.isEmpty { summary(pts) }
+                switch store.chartKind {
+                case .power: powerChart(metered)
+                case .temperature: HeatTempChart(store: store)
+                case .energy: HeatEnergyChart(store: store)
+                }
             }
+        }
+    }
+
+    private func powerChart(_ metered: [Plug]) -> some View {
+        let pts = store.chartPoints()
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(L.t("Effekt", "Power")).font(.subheadline.weight(.semibold))
+                Spacer()
+                Picker("", selection: $store.chartPlugID) {
+                    if metered.count > 1 {
+                        Text(L.t("Alla", "All")).tag(Optional(PlugStore.allPlugs))
+                        Divider()
+                    }
+                    ForEach(metered) { Text($0.name).tag(Optional($0.id)) }
+                }
+                .labelsHidden().fixedSize()
+            }
+            SpanPicker(store: store)
+
+            ZStack {
+                chart(pts, plugs: metered).frame(height: store.chartShowsAll ? 180 : 160)
+                if pts.isEmpty {
+                    if store.chartLoading {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text(L.t("Ingen data än. Molnet sparar en mätning var 5:e minut.",
+                                 "No data yet. The cloud saves a reading every 5 minutes."))
+                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                }
+            }
+            if !pts.isEmpty { summary(pts) }
         }
     }
 
@@ -326,11 +439,7 @@ private struct PowerChart: View {
         }
     }
 
-    private func axisLabel(_ d: Date) -> String {
-        store.chartSpan == .week
-            ? d.formatted(.dateTime.weekday(.abbreviated).locale(Fmt.locale))
-            : d.formatted(.dateTime.hour().minute().locale(Fmt.locale))
-    }
+    private func axisLabel(_ d: Date) -> String { chartAxisLabel(d, span: store.chartSpan) }
 
     /// Min, max och medel, och hur stor del av mätningarna som låg över gränsen (för en frys: hur mycket kompressorn går).
     private func summary(_ pts: [ChartPoint]) -> some View {
@@ -349,6 +458,149 @@ private struct PowerChart: View {
             parts.append(L.t("igång \(Int(share.rounded())) %", "running \(Int(share.rounded())) %"))
         }
         return Text(parts.joined(separator: "  ·  ")).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+    }
+}
+
+
+// MARK: - Värmepumpens diagram
+
+private struct HeatTempChart: View {
+    @ObservedObject var store: PlugStore
+
+    var body: some View {
+        let now = Date()
+        let (pts, bands) = store.heatSeries(now: now)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(L.t("Temperatur", "Temperature")).font(.subheadline.weight(.semibold))
+                Spacer()
+                if let n = store.chartHeat?.name { Text(n).font(.caption).foregroundStyle(.secondary) }
+            }
+            SpanPicker(store: store)
+            ZStack {
+                chart(pts, bands, now: now).frame(height: 160)
+                if pts.isEmpty {
+                    if store.chartLoading {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text(L.t("Ingen data än. Molnet sparar en mätning var 5:e minut.",
+                                 "No data yet. The cloud saves a reading every 5 minutes."))
+                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                }
+            }
+            if !pts.isEmpty { legendAndSummary(pts, hasBands: !bands.isEmpty) }
+        }
+    }
+
+    private static func bandColor(_ mode: String?) -> Color {
+        switch mode {
+        case "Cool": .blue
+        case "Dry": .teal
+        case "Fan": .indigo
+        case "Auto": .green
+        default: .orange
+        }
+    }
+
+    private func chart(_ pts: [TempPoint], _ bands: [RunBand], now: Date) -> some View {
+        Chart {
+            ForEach(bands) { b in
+                RectangleMark(xStart: .value("Start", b.start), xEnd: .value(L.t("Slut", "End"), b.end))
+                    .foregroundStyle(Self.bandColor(b.mode).opacity(0.12))
+            }
+            ForEach(pts) { p in
+                LineMark(x: .value("Tid", p.date), y: .value("°C", p.room), series: .value("Del", "r\(p.segment)"))
+                    .foregroundStyle(.orange)
+                if let s = p.set {
+                    LineMark(x: .value("Tid", p.date), y: .value(L.t("Mål", "Target"), s), series: .value("Del", "s\(p.segment)"))
+                        .foregroundStyle(.green).interpolationMethod(.stepEnd)
+                        .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                }
+            }
+            if let f = store.chartHeat?.frost, f.isEnabled {
+                RuleMark(y: .value(L.t("Frostskydd", "Frost protection"), f.min))
+                    .foregroundStyle(.blue.opacity(0.6)).lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+            }
+        }
+        .chartYScale(domain: .automatic(includesZero: false))
+        .chartXScale(domain: now.addingTimeInterval(-store.chartSpan.seconds)...now)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 4)) { v in
+                AxisGridLine()
+                AxisValueLabel(collisionResolution: .greedy) {
+                    if let d = v.as(Date.self) { Text(chartAxisLabel(d, span: store.chartSpan)) }
+                }
+            }
+        }
+        .chartYAxis {
+            AxisMarks { v in
+                AxisGridLine()
+                AxisValueLabel { if let d = v.as(Double.self) { Text(Fmt.num(d, decimals: 0) + "°") } }
+            }
+        }
+    }
+
+    private func legendAndSummary(_ pts: [TempPoint], hasBands: Bool) -> some View {
+        let rooms = pts.map(\.room)
+        let avg = rooms.reduce(0, +) / Double(rooms.count)
+        var parts = ["Min \(Fmt.temp(rooms.min()))", "Max \(Fmt.temp(rooms.max()))", L.t("Medel ", "Average ") + Fmt.temp(avg)]
+        parts.append(L.t("orange: rum, grön streckad: mål", "orange: room, dashed green: target") + (hasBands ? L.t(", skuggat: igång", ", shaded: running") : ""))
+        return Text(parts.joined(separator: "  ·  ")).font(.caption).foregroundStyle(.secondary).monospacedDigit()
+    }
+}
+
+private struct HeatEnergyChart: View {
+    @ObservedObject var store: PlugStore
+
+    var body: some View {
+        let now = Date()
+        let buckets = store.energyBuckets(now: now)
+        let unit: Calendar.Component = store.chartSpan == .week ? .day : .hour
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(L.t("Energi", "Energy")).font(.subheadline.weight(.semibold))
+                Spacer()
+                if let n = store.chartHeat?.name { Text(n).font(.caption).foregroundStyle(.secondary) }
+            }
+            SpanPicker(store: store)
+            ZStack {
+                Chart(buckets) { b in
+                    BarMark(x: .value("Tid", b.date, unit: unit), y: .value("kWh", b.kwh))
+                        .foregroundStyle(.indigo)
+                }
+                .chartXScale(domain: now.addingTimeInterval(-store.chartSpan.seconds)...now)
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: 4)) { v in
+                        AxisGridLine()
+                        AxisValueLabel(collisionResolution: .greedy) {
+                            if let d = v.as(Date.self) { Text(chartAxisLabel(d, span: store.chartSpan)) }
+                        }
+                    }
+                }
+                .chartYAxis {
+                    AxisMarks { v in
+                        AxisGridLine()
+                        AxisValueLabel { if let d = v.as(Double.self) { Text(Fmt.num(d, decimals: d < 10 ? 1 : 0)) } }
+                    }
+                }
+                .frame(height: 160)
+                if buckets.isEmpty {
+                    if store.chartLoading {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Text(L.t("Ingen energidata för perioden.", "No energy data for this period."))
+                            .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    }
+                }
+            }
+            if !buckets.isEmpty {
+                let total = buckets.reduce(0) { $0 + $1.kwh }
+                Text(L.t("Totalt ", "Total ") + Fmt.kwh(total) + L.t(" · kWh per ", " · kWh per ")
+                     + (store.chartSpan == .week ? L.t("dag", "day") : L.t("timme", "hour")))
+                    .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+            }
+        }
     }
 }
 

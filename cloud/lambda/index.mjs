@@ -387,10 +387,14 @@ async function writeAll(items) {
   for (let i = 0; i < items.length; i += 25) {
     let req = { [TABLE]: items.slice(i, i + 25).map((Item) => ({ PutRequest: { Item } })) };
     for (let attempt = 0; req && Object.keys(req).length; attempt++) {
-      if (attempt > 0) await new Promise((r) => setTimeout(r, 200 * 2 ** attempt));
-      if (attempt > 5) throw new Error('DynamoDB kept throttling the readings');
-      const r = await db.send(new BatchWriteCommand({ RequestItems: req }));
-      req = r.UnprocessedItems;
+      if (attempt > 0) await new Promise((r) => setTimeout(r, Math.min(200 * 2 ** attempt, 4000)));
+      if (attempt > 8) throw new Error('DynamoDB kept throttling the readings');
+      try {
+        req = (await db.send(new BatchWriteCommand({ RequestItems: req }))).UnprocessedItems;
+      } catch (e) {
+        // The table has few write units, so a big batch can be turned away whole: wait and send it again.
+        if (e.name !== 'ProvisionedThroughputExceededException') throw e;
+      }
     }
   }
 }

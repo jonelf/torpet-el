@@ -15,7 +15,7 @@ const SECRET_KEYS = new Set(['username', 'password']);
 /** Energy is fetched this often (the wire reports hourly), and this far back each time: the latest hour is still partial. */
 const ENERGY_EVERY = 50 * 60;
 const ENERGY_BACK = 4 * 3600;
-const ENERGY_FIRST_BACK = 3 * 86_400;
+const ENERGY_FIRST_BACK = 86_400;
 
 /** A string store for the library's session, backed by one table item. Written back only when something changed. */
 function sessionStore(saved, login) {

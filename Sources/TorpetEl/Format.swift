@@ -12,6 +12,39 @@ enum Fmt {
         return num(v, decimals: v < 10 && v != v.rounded() ? 1 : 0) + " W"
     }
 
+    static func temp(_ v: Double?, unit: Bool = true) -> String {
+        guard let v else { return "–" }
+        return num(v, decimals: 1) + (unit ? " °C" : "°")
+    }
+
+    static func kwh(_ v: Double) -> String { num(v, decimals: v < 10 ? 1 : 0) + " kWh" }
+
+    /// MELCloud's operation modes in the app's language. Anything unknown is shown as it came.
+    static func mode(_ m: String?) -> String {
+        switch m {
+        case "Heat": L.t("Värme", "Heat")
+        case "Cool": L.t("Kyla", "Cool")
+        case "Auto": L.t("Auto", "Auto")
+        case "Dry": L.t("Avfuktning", "Dry")
+        case "Fan": L.t("Fläkt", "Fan")
+        case let m?: m
+        case nil: "–"
+        }
+    }
+
+    static func fan(_ f: String?) -> String {
+        switch f {
+        case "Auto": L.t("auto", "auto")
+        case "One": "1"
+        case "Two": "2"
+        case "Three": "3"
+        case "Four": "4"
+        case "Five": "5"
+        case let f?: f
+        case nil: "–"
+        }
+    }
+
     static func hours(_ h: Double) -> String {
         h == h.rounded() ? "\(Int(h)) h" : num(h, decimals: 1) + " h"
     }

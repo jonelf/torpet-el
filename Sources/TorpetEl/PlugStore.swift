@@ -23,6 +23,43 @@ enum ChartSpan: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
+/// What the chart shows: the freezers' power, or the heat pump's temperatures or energy.
+enum ChartKind: String, CaseIterable, Identifiable, Sendable {
+    case power, temperature, energy
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .power: L.t("Effekt", "Power")
+        case .temperature: L.t("Temperatur", "Temperature")
+        case .energy: L.t("Energi", "Energy")
+        }
+    }
+}
+
+struct TempPoint: Identifiable, Sendable {
+    let date: Date
+    let room: Double
+    let set: Double?
+    /// New part after a gap, so the line isn't drawn across time without readings.
+    let segment: Int
+    var id: Date { date }
+}
+
+/// A stretch where the heat pump was on, shaded in the temperature chart.
+struct RunBand: Identifiable, Sendable {
+    let id: Int
+    let start: Date
+    let end: Date
+    let mode: String?
+}
+
+struct EnergyBucket: Identifiable, Sendable {
+    let date: Date
+    let kwh: Double
+    var id: Date { date }
+}
+
 struct ChartPoint: Identifiable, Sendable {
     let plugID: String
     let plugName: String
@@ -51,6 +88,14 @@ final class PlugStore: ObservableObject {
     @Published var status: [String: AlarmStatus] = [:]
     @Published private(set) var watch: [String: WatchConfig] = [:]
     @Published var chartPlugID: String? { didSet { if chartPlugID != oldValue { Task { await loadChart() } } } }
+    @Published var chartKind: ChartKind = .power { didSet { if chartKind != oldValue { Task { await loadChart() } } } }
+    @Published private(set) var heatPumps: [HeatPump] = []
+    @Published private(set) var heatPumpFetchedAt: Date?
+    @Published private(set) var heatPumpError: String?
+    @Published private(set) var heatSamples: [HeatSample] = []
+    @Published private(set) var energyHours: [EnergyHour] = []
+    /// kWh used since midnight, for the heat pump card.
+    @Published private(set) var energyToday: Double?
     @Published var chartSpan: ChartSpan = .day { didSet { if chartSpan != oldValue { Task { await loadChart() } } } }
     @Published private(set) var chartSamples: [String: [Sample]] = [:]
     @Published private(set) var chartLoading = false
@@ -104,6 +149,15 @@ final class PlugStore: ObservableObject {
             status = Dictionary(uniqueKeysWithValues: snap.plugs.map { ($0.id, $0.alarmStatus) })
             fetchedAt = snap.fetchedAt.map { Date(timeIntervalSince1970: $0) }
             error = cloudProblem(snap)
+            heatPumps = snap.heatPumps ?? []
+            heatPumpFetchedAt = snap.heatPumpFetchedAt.map { Date(timeIntervalSince1970: $0) }
+            heatPumpError = heatPumpProblem(snap)
+            if heatPumps.isEmpty {
+                chartKind = .power
+            } else if !plugs.contains(where: \.hasMeter), chartKind == .power {
+                chartKind = .temperature
+            }
+            await loadEnergyToday()
 
             if chartPlugID == nil || (!chartShowsAll && !plugs.contains(where: { $0.id == chartPlugID })) {
                 // Alla pluggar i samma diagram som standard, om det finns fler än en att jämföra.
@@ -129,6 +183,17 @@ final class PlugStore: ObservableObject {
         }
         if let f = fetchedAt, Date().timeIntervalSince(f) > Self.stale {
             return L.t("Molnet har inte hämtat något sedan ", "The cloud hasn't fetched anything since ") + Fmt.time(f) + "."
+        }
+        return nil
+    }
+
+    private func heatPumpProblem(_ snap: CloudSnapshot) -> String? {
+        if let e = snap.heatPumpError {
+            let since = snap.heatPumpFailingSince.map { L.t(" sedan ", " since ") + Fmt.time(Date(timeIntervalSince1970: $0)) } ?? ""
+            return L.t("Molnet får inget svar från MELCloud", "The cloud gets no answer from MELCloud") + since + ": " + e
+        }
+        if !heatPumps.isEmpty, let f = heatPumpFetchedAt, Date().timeIntervalSince(f) > Self.stale {
+            return L.t("Värmepumpen har inte lästs av sedan ", "The heat pump hasn't been read since ") + Fmt.time(f) + "."
         }
         return nil
     }
@@ -201,7 +266,9 @@ final class PlugStore: ObservableObject {
         }
     }
 
-    var anyAlarm: Bool { status.values.contains { $0.idleAlarm || $0.offlineAlarm } }
+    var anyAlarm: Bool {
+        status.values.contains { $0.idleAlarm || $0.offlineAlarm } || heatPumps.contains(where: \.hasError)
+    }
 
     // MARK: Diagram
 
@@ -222,7 +289,25 @@ final class PlugStore: ObservableObject {
         return config(for: p)
     }
 
+    /// The heat pump the temperature and energy charts show.
+    var chartHeat: HeatPump? { heatPumps.first }
+
     func loadChart() async {
+        if chartKind != .power, let hp = chartHeat {
+            chartLoading = true
+            defer { chartLoading = false }
+            let from = Date().addingTimeInterval(-chartSpan.seconds)
+            do {
+                if chartKind == .temperature {
+                    heatSamples = try await client.heatSamples(unit: hp.id, since: from)
+                } else {
+                    energyHours = try await client.heatEnergy(unit: hp.id, since: from)
+                }
+            } catch {
+                // As for the power chart: it tries again at the next refresh.
+            }
+            return
+        }
         let ids = chartPlugIDs
         guard !ids.isEmpty else { return }
         chartLoading = true
@@ -269,10 +354,73 @@ final class PlugStore: ObservableObject {
         return out
     }
 
+    private func loadEnergyToday() async {
+        guard let hp = chartHeat else { energyToday = nil; return }
+        let midnight = Calendar.current.startOfDay(for: Date())
+        if let hours = try? await client.heatEnergy(unit: hp.id, since: midnight) {
+            energyToday = hours.reduce(0) { $0 + $1.kwh }
+        }
+    }
+
+    /// Room temperature and setpoint as lines, split where the readings have gaps, plus the stretches where the unit ran.
+    func heatSeries(now: Date = Date()) -> (points: [TempPoint], bands: [RunBand]) {
+        let from = now.addingTimeInterval(-chartSpan.seconds)
+        var points: [TempPoint] = []
+        var bands: [RunBand] = []
+        var segment = 0
+        var prev: Date?
+        var open: (start: Date, mode: String?)?
+        func close(at end: Date) {
+            if let o = open { bands.append(RunBand(id: bands.count, start: o.start, end: end, mode: o.mode)) }
+            open = nil
+        }
+        for s in heatSamples where s.date >= from {
+            if let p = prev, s.date.timeIntervalSince(p) > Alarm.maxGap {
+                close(at: p)
+                segment += 1
+            }
+            prev = s.date
+            if let r = s.room { points.append(TempPoint(date: s.date, room: r, set: s.set, segment: segment)) }
+            if s.power == true {
+                if open == nil { open = (s.date, s.mode) }
+            } else {
+                close(at: s.date)
+            }
+        }
+        if let p = prev { close(at: p) }
+        return (points, bands)
+    }
+
+    /// Energy per hour, or per day for the week view.
+    func energyBuckets(now: Date = Date()) -> [EnergyBucket] {
+        let from = now.addingTimeInterval(-chartSpan.seconds)
+        let cal = Calendar.current
+        let hours = energyHours.filter { $0.date >= from }
+        guard chartSpan == .week else { return hours.map { EnergyBucket(date: $0.date, kwh: $0.kwh) } }
+        return Dictionary(grouping: hours) { cal.startOfDay(for: $0.date) }
+            .map { EnergyBucket(date: $0.key, kwh: $0.value.reduce(0) { $0 + $1.kwh }) }
+            .sorted { $0.date < $1.date }
+    }
+
     // MARK: Menyraden
 
+    /// The cottage's temperature after the freezers' watts, or a warning if the heat pump reports a fault.
+    private var heatTitle: String {
+        guard let hp = heatPumps.first else { return "" }
+        if hp.hasError { return "⚠ " + hp.name }
+        guard let f = heatPumpFetchedAt, Date().timeIntervalSince(f) <= Self.stale, let room = hp.room else { return "" }
+        return "⌂ " + Fmt.temp(room, unit: false)
+    }
+
     var menuTitle: String {
-        if plugs.isEmpty { return needsSetup ? "Torpet –" : "Torpet …" }
+        [plugTitle, heatTitle].filter { !$0.isEmpty }.joined(separator: "  ")
+    }
+
+    private var plugTitle: String {
+        if plugs.isEmpty {
+            if !heatPumps.isEmpty { return "" }
+            return needsSetup ? "Torpet –" : "Torpet …"
+        }
         let alarmed = plugs.filter { status[$0.id]?.idleAlarm == true || status[$0.id]?.offlineAlarm == true }
         if !alarmed.isEmpty { return alarmed.map(\.name).joined(separator: ", ") }
         // Bara frysar som går just nu visar watt; står alla still syns bara blixten.

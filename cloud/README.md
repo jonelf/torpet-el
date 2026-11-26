@@ -5,7 +5,7 @@ Tuya, saves the readings in DynamoDB and sends alarms to your phone through [ntf
 read status and charts from it instead of polling Tuya itself.
 
 Everything runs in **eu-north-1** within AWS's Always Free tier: EventBridge Scheduler, about 8,600 Lambda runs a
-month, a DynamoDB table with 5 read and 2 write units provisioned, Parameter Store (standard), and logs kept for 14 days.
+month, a DynamoDB table with 5 read and 5 write units provisioned, Parameter Store (standard), and logs kept for 14 days.
 
 ## Setup
 

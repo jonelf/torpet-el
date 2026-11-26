@@ -30,6 +30,53 @@ struct Sample: Sendable {
     let power: Double?
 }
 
+/// The air-to-air heat pump, as the cloud reads it from MELCloud Home.
+struct HeatPump: Identifiable, Decodable, Sendable {
+    struct Frost: Decodable, Sendable { let isEnabled: Bool; let min: Double; let max: Double }
+    struct Holiday: Decodable, Sendable { let isEnabled: Bool; let startDate: String?; let endDate: String? }
+
+    let id: String
+    let name: String
+    let power: Bool?
+    /// MELCloud's own word: Heat, Cool, Auto, Dry or Fan.
+    let mode: String?
+    let room: Double?
+    let set: Double?
+    let fan: String?
+    /// Wi-Fi signal in dBm.
+    let rssi: Double?
+    let connected: Bool?
+    let inError: Bool?
+    let error: String?
+    let step: Double?
+    let minHeat: Double?
+    let maxHeat: Double?
+    let frost: Frost?
+    /// Only present while holiday mode is on: the dates of a switched-off holiday mean nothing.
+    let holiday: Holiday?
+
+    var isOn: Bool { power == true }
+    var isConnected: Bool { connected != false }
+    var hasError: Bool { inError == true }
+}
+
+/// One reading of the heat pump.
+struct HeatSample: Sendable {
+    let date: Date
+    let room: Double?
+    let set: Double?
+    let mode: String?
+    let power: Bool?
+    let rssi: Double?
+    let connected: Bool?
+}
+
+/// Energy used in the hour that starts at `date`.
+struct EnergyHour: Sendable {
+    let date: Date
+    let kwh: Double
+}
+
 struct CloudSnapshot: Decodable, Sendable {
     struct Status: Decodable, Sendable {
         let idleSince, lastActive, offlineSince, lastReading: Double?
@@ -64,6 +111,11 @@ struct CloudSnapshot: Decodable, Sendable {
     let tuyaError: String?
     let tuyaFailingSince: Double?
     let plugs: [CloudPlug]
+    // The heat pump fields are missing from a cloud that hasn't been redeployed, or has no MELCloud login.
+    let heatPumps: [HeatPump]?
+    let heatPumpFetchedAt: Double?
+    let heatPumpError: String?
+    let heatPumpFailingSince: Double?
 }
 
 // MARK: - Settings
@@ -143,6 +195,27 @@ actor CloudClient {
         return try JSONDecoder().decode(R.self, from: data).samples.map {
             Sample(date: Date(timeIntervalSince1970: $0.t), online: $0.online ?? false, power: $0.power)
         }
+    }
+
+    func heatSamples(unit: String, since: Date) async throws -> [HeatSample] {
+        struct R: Decodable {
+            struct S: Decodable { let t: Double; let room, set, rssi: Double?; let mode: String?; let power, connected: Bool? }
+            let samples: [S]
+        }
+        let data = try await send("GET", "heatpump/samples", query: ["unit": unit, "since": String(Int(since.timeIntervalSince1970))])
+        return try JSONDecoder().decode(R.self, from: data).samples.map {
+            HeatSample(date: Date(timeIntervalSince1970: $0.t), room: $0.room, set: $0.set, mode: $0.mode,
+                       power: $0.power, rssi: $0.rssi, connected: $0.connected)
+        }
+    }
+
+    func heatEnergy(unit: String, since: Date) async throws -> [EnergyHour] {
+        struct R: Decodable {
+            struct H: Decodable { let t: Double; let kwh: Double }
+            let hours: [H]
+        }
+        let data = try await send("GET", "heatpump/energy", query: ["unit": unit, "since": String(Int(since.timeIntervalSince1970))])
+        return try JSONDecoder().decode(R.self, from: data).hours.map { EnergyHour(date: Date(timeIntervalSince1970: $0.t), kwh: $0.kwh) }
     }
 
     func saveWatch(_ id: String, _ w: WatchConfig) async throws {
