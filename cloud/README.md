@@ -49,6 +49,19 @@ and the reminders start over:
 aws ssm put-parameter --name /torpet-el/tuya-trial-expires --type String --overwrite --value 2027-05-01 --profile personal
 ```
 
+### Heat pump alarms
+
+The heat pump (MELCloud Home) has its own alarms, so the pipes at the cottage don't freeze. The temperature is the unit's own
+thermometer. The defaults can be changed per unit under the slider icon on its card:
+
+- **Cold:** below 10 °C for 30 minutes is an alarm (priority 5). It counts as over once the room is back above 10.5 °C.
+- **Cool:** below 11 °C for 30 minutes is a quieter warning (priority 3), the step before the alarm, with no follow-up.
+- **Fault:** the unit reports an error. The message from the unit is in the notification.
+- **Offline:** MELCloud says the unit has lost contact for 30 minutes. The temperature can't be seen then.
+- **No readings:** the cloud has been unable to read MELCloud for an hour. The same alarm for the app and the phone.
+
+A gap of more than 20 minutes between readings restarts the counting, as for the freezers.
+
 Differences from the app:
 - The alarm periods are built up one reading at a time, so changed settings apply from the next reading instead of
   being recalculated over earlier readings.
@@ -102,6 +115,14 @@ confirmation before switching off a watched plug.
 starts at `t`. `/status` also has `heatPumps` (the latest state, frost protection and an active holiday mode),
 `heatPumpFetchedAt`, `heatPumpError` and `heatPumpFailingSince`.
 
+`POST /heatpump/<id>/set` with any of `{ "power", "operationMode", "setTemperature", "setFanSpeed" }` writes to the unit through
+MELCloud (modes `Heat Cool Auto Dry Fan`, fan `Auto One … Five`). `PUT /heatpump/<id>/frost` takes `{ "isEnabled", "min", "max" }` (4 to 16 °C,
+at least 2 apart) and `PUT /heatpump/<id>/holiday` takes `{ "isEnabled", "startDate", "endDate" }` as local times. They answer
+`{ "latest": … }`, the unit's state afterwards. A write that would change nothing is not an error, and a write is never retried.
+
+`PUT /heatpump/watch/<id>` with body `{ "enabled", "lowC", "warnC", "minutes", "errorAlarm", "offlineMinutes" }` saves the heat pump's alarm
+settings. `/status` has them per heat pump as `watch`, with `status` (`coldAlarm`, `coolWarning`, `errorAlarm`, `offlineAlarm`).
+
 `POST /test` sends a test notification.
 
 ## Table `TorpetEl`
@@ -114,6 +135,7 @@ starts at `t`. `/status` also has `heatPumps` (the latest state, frost protectio
 | `TOKEN` | 0 | Cached Tuya token |
 | `HP` | 0 | Heat pump: latest values, last fetch, MELCloud errors |
 | `MELCLOUD` | 0 | MELCloud session tokens (the password is not stored here) |
+| `HPWATCH#<id>` | 0 | Heat pump alarm settings |
 | `H#<id>` | Unix time | One heat pump reading, deleted by TTL |
 | `E#<id>` | Unix time | Energy used in the hour starting then, kWh, deleted by TTL |
 

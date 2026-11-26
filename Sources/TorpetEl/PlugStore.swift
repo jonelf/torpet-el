@@ -92,6 +92,9 @@ final class PlugStore: ObservableObject {
     @Published private(set) var heatPumps: [HeatPump] = []
     @Published private(set) var heatPumpFetchedAt: Date?
     @Published private(set) var heatPumpError: String?
+    @Published private(set) var heatWatch: [String: HeatWatch] = [:]
+    @Published private(set) var heatPumpNoData = false
+    private var pendingHeatSaves: [String: Task<Void, Never>] = [:]
     @Published private(set) var heatSamples: [HeatSample] = []
     @Published private(set) var energyHours: [EnergyHour] = []
     /// kWh used since midnight, for the heat pump card.
@@ -152,6 +155,13 @@ final class PlugStore: ObservableObject {
             heatPumps = snap.heatPumps ?? []
             heatPumpFetchedAt = snap.heatPumpFetchedAt.map { Date(timeIntervalSince1970: $0) }
             heatPumpError = heatPumpProblem(snap)
+            heatPumpNoData = snap.heatPumpNoData ?? false
+            var hw: [String: HeatWatch] = [:]
+            for p in heatPumps {
+                // As for the plugs: a change that hasn't been saved yet isn't overwritten by the cloud's older value.
+                hw[p.id] = pendingHeatSaves[p.id] != nil ? heatWatch[p.id] : (p.watch ?? .default)
+            }
+            heatWatch = hw
             if heatPumps.isEmpty {
                 chartKind = .power
             } else if !plugs.contains(where: \.hasMeter), chartKind == .power {
@@ -206,6 +216,107 @@ final class PlugStore: ObservableObject {
         Binding(get: { self.config(for: plug) }, set: { self.setConfig($0, for: plug.id) })
     }
 
+    func heatWatch(for pump: HeatPump) -> HeatWatch { heatWatch[pump.id] ?? pump.watch ?? .default }
+
+    func heatWatchBinding(for pump: HeatPump) -> Binding<HeatWatch> {
+        Binding(get: { self.heatWatch(for: pump) }, set: { self.setHeatWatch($0, for: pump.id) })
+    }
+
+    private func setHeatWatch(_ w: HeatWatch, for id: String) {
+        var w = w
+        // The warning is the step before the alarm, so it never sits below it.
+        w.warnC = max(w.warnC, w.lowC)
+        heatWatch[id] = w
+        pendingHeatSaves[id]?.cancel()
+        pendingHeatSaves[id] = Task {
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            do {
+                try await client.saveHeatWatch(id, w)
+            } catch {
+                self.error = L.t("Kunde inte spara värmepumpens larm: ", "Couldn't save the heat pump alarms: ") + error.localizedDescription
+            }
+            if !Task.isCancelled { pendingHeatSaves[id] = nil }
+        }
+    }
+
+    // MARK: Värmepumpens styrning
+
+    @Published private(set) var heatBusy: Set<String> = []
+    /// A target temperature that has been dialled in but not sent yet.
+    @Published private(set) var heatTarget: [String: Double] = [:]
+    @Published private(set) var frostDraft: [String: HeatPump.Frost] = [:]
+    private var pendingTarget: [String: Task<Void, Never>] = [:]
+    private var pendingFrost: [String: Task<Void, Never>] = [:]
+
+    func heatTargetValue(_ p: HeatPump) -> Double { heatTarget[p.id] ?? p.set ?? 20 }
+
+    /// Shows the new value at once and sends it when the clicking has stopped for a moment.
+    func setHeatTarget(_ p: HeatPump, _ value: Double) {
+        heatTarget[p.id] = value
+        pendingTarget[p.id]?.cancel()
+        pendingTarget[p.id] = Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            await heatChange(p, errorText: L.t("Kunde inte ändra måltemperaturen: ", "Couldn't change the target temperature: ")) {
+                try await $0.heatSet(p.id, HeatCommand(setTemperature: value))
+            }
+            if !Task.isCancelled { heatTarget[p.id] = nil; pendingTarget[p.id] = nil }
+        }
+    }
+
+    func sendHeat(_ p: HeatPump, _ command: HeatCommand) async {
+        await heatChange(p, errorText: L.t("Kunde inte styra värmepumpen: ", "Couldn't control the heat pump: ")) {
+            try await $0.heatSet(p.id, command)
+        }
+    }
+
+    func frostValue(_ p: HeatPump) -> HeatPump.Frost {
+        frostDraft[p.id] ?? p.frost ?? HeatPump.Frost(isEnabled: false, min: 10, max: 12)
+    }
+
+    /// Frost protection keeps at least 2 °C between its two limits.
+    func setFrost(_ p: HeatPump, _ f: HeatPump.Frost, changedMax: Bool = false) {
+        var f = f
+        if f.max < f.min + 2 { if changedMax { f.min = f.max - 2 } else { f.max = f.min + 2 } }
+        frostDraft[p.id] = f
+        pendingFrost[p.id]?.cancel()
+        pendingFrost[p.id] = Task {
+            try? await Task.sleep(for: .seconds(1.5))
+            guard !Task.isCancelled else { return }
+            await heatChange(p, errorText: L.t("Kunde inte ändra frostskyddet: ", "Couldn't change frost protection: ")) {
+                try await $0.heatFrost(p.id, f)
+            }
+            if !Task.isCancelled { frostDraft[p.id] = nil; pendingFrost[p.id] = nil }
+        }
+    }
+
+    func setHoliday(_ p: HeatPump, enabled: Bool, start: Date = Date(), end: Date = Date()) async {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "Europe/Stockholm")
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        await heatChange(p, errorText: L.t("Kunde inte ändra semesterläget: ", "Couldn't change holiday mode: ")) {
+            try await $0.heatHoliday(p.id, enabled: enabled, start: f.string(from: start), end: f.string(from: end))
+        }
+    }
+
+    /// Runs a write and puts the unit's new state in place of the old one, keeping the cloud's alarm settings and status.
+    private func heatChange(_ p: HeatPump, errorText: String, _ write: (CloudClient) async throws -> HeatPump) async {
+        heatBusy.insert(p.id)
+        defer { heatBusy.remove(p.id) }
+        do {
+            var latest = try await write(client)
+            if let i = heatPumps.firstIndex(where: { $0.id == p.id }) {
+                latest.watch = heatPumps[i].watch
+                latest.status = heatPumps[i].status
+                heatPumps[i] = latest
+            }
+        } catch {
+            self.error = errorText + error.localizedDescription
+        }
+    }
+
     // MARK: På och av
 
     func setSwitch(_ plug: Plug, on: Bool) async {
@@ -253,6 +364,32 @@ final class PlugStore: ObservableObject {
                                    "No contact since \(Fmt.time(s.offlineSince ?? Date())). Power cut, tripped fuse or the network at the cottage?")),
                        recovered: (L.t("\(p.name) är online igen", "\(p.name) is back online"), ""))
         }
+        for p in heatPumps {
+            guard let s = p.status else { continue }
+            let room = Fmt.temp(p.room)
+            transition("\(p.id)|cold", active: s.coldAlarm == true,
+                       alarm: (L.t("\(p.name): kallt på torpet", "\(p.name): cold at the cottage"),
+                               L.t("\(room) sedan \(Fmt.time(s.coldSince.map { Date(timeIntervalSince1970: $0) } ?? Date())). Vattenrören kan frysa.",
+                                   "\(room) since \(Fmt.time(s.coldSince.map { Date(timeIntervalSince1970: $0) } ?? Date())). The water pipes may freeze.")),
+                       recovered: (L.t("\(p.name): varmare igen", "\(p.name): warming up again"), L.t("Just nu \(room).", "Currently \(room).")))
+            // The warning has no follow-up: it just gives way to the alarm or to a warm room.
+            let coolKey = "\(p.id)|cool"
+            if s.coolWarning == true {
+                if !notified.contains(coolKey) {
+                    notified.insert(coolKey)
+                    Notifier.shared.send(title: L.t("\(p.name): svalnar", "\(p.name): getting cool"), body: room)
+                }
+            } else {
+                notified.remove(coolKey)
+            }
+            transition("\(p.id)|error", active: s.errorAlarm == true,
+                       alarm: (L.t("\(p.name): fel", "\(p.name): fault"), p.error ?? L.t("Värmepumpen rapporterar ett fel.", "The heat pump reports a fault.")),
+                       recovered: (L.t("\(p.name): felet är borta", "\(p.name): the fault is gone"), ""))
+            transition("\(p.id)|offline", active: s.offlineAlarm == true,
+                       alarm: (L.t("\(p.name) är offline", "\(p.name) is offline"),
+                               L.t("Rumstemperaturen går inte att se. Wi-Fi eller strömmen på torpet?", "The room temperature can't be seen. Wi-Fi or power at the cottage?")),
+                       recovered: (L.t("\(p.name) är online igen", "\(p.name) is back online"), ""))
+        }
         UserDefaults.standard.set(Array(notified), forKey: "notified")
     }
 
@@ -267,7 +404,8 @@ final class PlugStore: ObservableObject {
     }
 
     var anyAlarm: Bool {
-        status.values.contains { $0.idleAlarm || $0.offlineAlarm } || heatPumps.contains(where: \.hasError)
+        status.values.contains { $0.idleAlarm || $0.offlineAlarm } || heatPumpNoData
+            || heatPumps.contains { $0.hasError || $0.status?.coldAlarm == true || $0.status?.offlineAlarm == true }
     }
 
     // MARK: Diagram
@@ -408,8 +546,9 @@ final class PlugStore: ObservableObject {
     private var heatTitle: String {
         guard let hp = heatPumps.first else { return "" }
         if hp.hasError { return "⚠ " + hp.name }
+        if hp.status?.coldAlarm == true { return "⚠ " + Fmt.temp(hp.room, unit: false) }
         guard let f = heatPumpFetchedAt, Date().timeIntervalSince(f) <= Self.stale, let room = hp.room else { return "" }
-        return "⌂ " + Fmt.temp(room, unit: false)
+        return Fmt.temp(room, unit: false)
     }
 
     var menuTitle: String {

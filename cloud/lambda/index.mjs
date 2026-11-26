@@ -10,7 +10,7 @@ import {
   BatchGetCommand, BatchWriteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { GetParametersByPathCommand, SSMClient } from '@aws-sdk/client-ssm';
-import { pollHeatPump } from './heatpump.mjs';
+import { controlHeatPump, defaultHeatWatch, parseHeatCommand, parseHeatWatch, pollHeatPump } from './heatpump.mjs';
 
 const TABLE = process.env.TABLE;
 const PARAM_PATH = process.env.PARAM_PATH ?? '/torpet-el';
@@ -241,9 +241,9 @@ function step(state, plug, watch, now) {
 }
 
 /** Sends one notification when an alarm starts and one when it ends. A failed send is retried next run. */
-async function transition(cfg, meta, key, active, alarm, recovered) {
+async function transition(cfg, meta, key, active, alarm, recovered, { priority = 5, tags = ['warning'] } = {}) {
   if (active && !meta.alarms[key]) {
-    if (await notify(cfg, { ...alarm, priority: 5, tags: ['warning'] })) meta.alarms[key] = Math.floor(Date.now() / 1000);
+    if (await notify(cfg, { ...alarm, priority, tags })) meta.alarms[key] = Math.floor(Date.now() / 1000);
   } else if (!active && meta.alarms[key]) {
     if (!recovered || await notify(cfg, { ...recovered, priority: 3, tags: ['white_check_mark'] })) delete meta.alarms[key];
   }
@@ -407,7 +407,9 @@ async function poll() {
   // The freezers come first and a failure in one part never stops the other.
   await pollTuya(cfg).catch((e) => console.error('Tuya poll:', e));
   const now = Math.floor(Date.now() / 1000);
-  await pollHeatPump({ cfg, now, ttl: now + KEEP_DAYS * 86_400, getItem, putItem, writeAll });
+  await pollHeatPump({
+    cfg, now, ttl: now + KEEP_DAYS * 86_400, getItem, putItem, writeAll, alarm: { transition, L, fmtTime },
+  });
 }
 
 async function pollTuya(cfg) {
@@ -531,6 +533,9 @@ async function http(event) {
   if (method === 'GET' && path === '/status') {
     const meta = (await getItem('META')) ?? { devices: {}, alarms: {} };
     const hp = await getItem('HP');
+    const heatWatches = Object.fromEntries(await Promise.all(
+      Object.keys(hp?.units ?? {}).map(async (id) => [id, (await getItem(`HPWATCH#${id}`))?.watch]),
+    ));
     const ids = Object.keys(meta.devices ?? {});
     const watches = ids.length ? await loadWatches(ids, Object.fromEntries(ids.map((id) => [id, meta.devices[id].name]))) : {};
     const plugs = ids.map((id) => {
@@ -556,7 +561,18 @@ async function http(event) {
       tuyaFailingSince: meta.tuyaFailingSince ?? null,
       trialExpires: cfg.trialExpires,
       plugs,
-      heatPumps: Object.values(hp?.units ?? {}).map((u) => u.latest).sort((a, b) => a.name.localeCompare(b.name, 'sv')),
+      heatPumps: Object.entries(hp?.units ?? {}).map(([id, u]) => ({
+        ...u.latest,
+        watch: heatWatches[id] ?? defaultHeatWatch(),
+        status: {
+          coldSince: u.state?.coldSince ?? null,
+          coldAlarm: !!hp.alarms?.[`${id}|cold`],
+          coolWarning: !!hp.alarms?.[`${id}|cool`],
+          errorAlarm: !!hp.alarms?.[`${id}|error`],
+          offlineAlarm: !!hp.alarms?.[`${id}|offline`],
+        },
+      })).sort((a, b) => a.name.localeCompare(b.name, 'sv')),
+      heatPumpNoData: !!hp?.alarms?.['hp|nodata'],
       heatPumpFetchedAt: hp?.fetchedAt ?? null,
       heatPumpError: hp?.error ?? null,
       heatPumpFailingSince: hp?.failingSince ?? null,
@@ -600,6 +616,49 @@ async function http(event) {
           rssi: it.rssi ?? null, connected: it.connected ?? null, error: it.error ?? null,
         })),
       });
+  }
+
+  const hc = path.match(/^\/heatpump\/([A-Za-z0-9_-]{1,64})\/(set|frost|holiday)$/);
+  if ((method === 'POST' || method === 'PUT') && hc) {
+    let body;
+    try {
+      body = JSON.parse(event.isBase64Encoded ? Buffer.from(event.body ?? '', 'base64').toString() : event.body ?? '');
+    } catch {
+      return json(400, { error: 'body must be JSON' });
+    }
+    const hp = await getItem('HP');
+    const unit = hp?.units?.[hc[1]];
+    if (!unit) return json(404, { error: 'unknown unit' });
+    const command = parseHeatCommand(hc[2], body, unit.latest);
+    if (command.error) return json(400, { error: command.error });
+    try {
+      const latest = await controlHeatPump({ cfg, getItem, putItem }, hc[1], command);
+      // Show the new state right away instead of after the next poll.
+      await db.send(new UpdateCommand({
+        TableName: TABLE,
+        Key: { pk: 'HP', sk: 0 },
+        UpdateExpression: 'SET units.#id.latest = :l',
+        ExpressionAttributeNames: { '#id': hc[1] },
+        ExpressionAttributeValues: { ':l': latest },
+      })).catch((e) => console.error('HP latest:', e));
+      return json(200, { unit: hc[1], latest });
+    } catch (e) {
+      return json(e.status ?? 502, { error: e.message });
+    }
+  }
+
+  const hw = path.match(/^\/heatpump\/watch\/([A-Za-z0-9_-]{1,64})$/);
+  if (method === 'PUT' && hw) {
+    let body;
+    try {
+      body = JSON.parse(event.isBase64Encoded ? Buffer.from(event.body ?? '', 'base64').toString() : event.body ?? '');
+    } catch {
+      return json(400, { error: 'body must be JSON' });
+    }
+    const watch = parseHeatWatch(body);
+    if (!watch) return json(400, { error: 'expected {enabled, lowC, warnC, minutes, errorAlarm, offlineMinutes}' });
+    await putItem({ pk: `HPWATCH#${hw[1]}`, sk: 0, watch });
+    return json(200, { unit: hw[1], watch });
   }
 
   const m = path.match(/^\/watch\/([A-Za-z0-9_-]{1,64})$/);

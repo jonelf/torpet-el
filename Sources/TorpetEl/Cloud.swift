@@ -30,9 +30,29 @@ struct Sample: Sendable {
     let power: Double?
 }
 
+/// Alarm settings of the heat pump, kept in the cloud. The room temperature is the unit's own thermometer.
+struct HeatWatch: Codable, Equatable, Sendable {
+    var enabled: Bool
+    /// Alarm when the room has stayed below this for `minutes`.
+    var lowC: Double
+    /// A quieter warning below this, the step before the alarm.
+    var warnC: Double
+    var minutes: Double
+    var errorAlarm: Bool
+    var offlineMinutes: Double
+
+    static let `default` = HeatWatch(enabled: true, lowC: 10, warnC: 11, minutes: 30, errorAlarm: true, offlineMinutes: 30)
+}
+
+struct HeatStatus: Decodable, Sendable {
+    let coldSince: Double?
+    let coldAlarm, coolWarning, errorAlarm, offlineAlarm: Bool?
+}
+
 /// The air-to-air heat pump, as the cloud reads it from MELCloud Home.
 struct HeatPump: Identifiable, Decodable, Sendable {
-    struct Frost: Decodable, Sendable { let isEnabled: Bool; let min: Double; let max: Double }
+    /// `active`: MELCloud says frost protection is in control, and then it ignores changes to the target temperature.
+    struct Frost: Codable, Equatable, Sendable { var isEnabled: Bool; var min: Double; var max: Double; var active: Bool? = nil }
     struct Holiday: Decodable, Sendable { let isEnabled: Bool; let startDate: String?; let endDate: String? }
 
     let id: String
@@ -54,10 +74,20 @@ struct HeatPump: Identifiable, Decodable, Sendable {
     let frost: Frost?
     /// Only present while holiday mode is on: the dates of a switched-off holiday mean nothing.
     let holiday: Holiday?
+    var watch: HeatWatch?
+    var status: HeatStatus?
 
     var isOn: Bool { power == true }
     var isConnected: Bool { connected != false }
     var hasError: Bool { inError == true }
+}
+
+/// A change to the unit. Only what is set is sent.
+struct HeatCommand: Encodable, Sendable {
+    var power: Bool?
+    var operationMode: String?
+    var setTemperature: Double?
+    var setFanSpeed: String?
 }
 
 /// One reading of the heat pump.
@@ -116,6 +146,7 @@ struct CloudSnapshot: Decodable, Sendable {
     let heatPumpFetchedAt: Double?
     let heatPumpError: String?
     let heatPumpFailingSince: Double?
+    let heatPumpNoData: Bool?
 }
 
 // MARK: - Settings
@@ -168,7 +199,8 @@ actor CloudClient {
     private var config: CloudConfig? = CloudStore.load()
     private let session: URLSession = {
         let cfg = URLSessionConfiguration.ephemeral
-        cfg.timeoutIntervalForRequest = 20
+        // A write goes through MELCloud, which can take a while to answer.
+        cfg.timeoutIntervalForRequest = 45
         return URLSession(configuration: cfg)
     }()
 
@@ -216,6 +248,30 @@ actor CloudClient {
         }
         let data = try await send("GET", "heatpump/energy", query: ["unit": unit, "since": String(Int(since.timeIntervalSince1970))])
         return try JSONDecoder().decode(R.self, from: data).hours.map { EnergyHour(date: Date(timeIntervalSince1970: $0.t), kwh: $0.kwh) }
+    }
+
+    /// Writes to the unit through the cloud, and returns its state afterwards.
+    func heatSet(_ id: String, _ command: HeatCommand) async throws -> HeatPump {
+        try await heatWrite("POST", "heatpump/\(id)/set", try JSONEncoder().encode(command))
+    }
+
+    func heatFrost(_ id: String, _ frost: HeatPump.Frost) async throws -> HeatPump {
+        try await heatWrite("PUT", "heatpump/\(id)/frost", try JSONEncoder().encode(frost))
+    }
+
+    /// Dates are local wall-clock times like 2026-12-01T08:00:00. Without `isEnabled` the dates are ignored.
+    func heatHoliday(_ id: String, enabled: Bool, start: String?, end: String?) async throws -> HeatPump {
+        struct Body: Encodable { let isEnabled: Bool; let startDate, endDate: String? }
+        return try await heatWrite("PUT", "heatpump/\(id)/holiday", try JSONEncoder().encode(Body(isEnabled: enabled, startDate: start, endDate: end)))
+    }
+
+    private func heatWrite(_ method: String, _ path: String, _ body: Data) async throws -> HeatPump {
+        struct R: Decodable { let latest: HeatPump }
+        return try JSONDecoder().decode(R.self, from: try await send(method, path, body: body)).latest
+    }
+
+    func saveHeatWatch(_ id: String, _ w: HeatWatch) async throws {
+        _ = try await send("PUT", "heatpump/watch/\(id)", body: try JSONEncoder().encode(w))
     }
 
     func saveWatch(_ id: String, _ w: WatchConfig) async throws {

@@ -54,7 +54,7 @@ struct PopoverView: View {
                     HStack { Spacer(); ProgressView(); Spacer() }.padding(30)
                 }
             } else {
-                ForEach(store.plugs) { PlugCard(store: store, plug: $0) }
+                PlugSection(store: store)
                 if store.heatPumps.isEmpty, let e = store.heatPumpError {
                     Label(e, systemImage: "exclamationmark.triangle")
                         .font(.caption).foregroundStyle(.orange)
@@ -118,66 +118,138 @@ private struct Footer: View {
 
 // MARK: - Pluggar
 
-private struct PlugCard: View {
+/// The switch of a plug. Switching off a watched plug (usually a freezer) asks first, so a misclick can't turn it off.
+private struct PlugToggle: View {
     @ObservedObject var store: PlugStore
     let plug: Plug
-    @State private var editing = false
     @State private var confirmOff = false
+
+    var body: some View {
+        let cfg = store.config(for: plug)
+        if !plug.online {
+            Label("Offline", systemImage: "wifi.slash").font(.caption).foregroundStyle(.orange)
+        } else if let on = plug.isOn {
+            let busy = store.switching.contains(plug.id)
+            HStack(spacing: 4) {
+                if busy { ProgressView().controlSize(.mini) }
+                Toggle(on ? L.t("På", "On") : L.t("Av", "Off"), isOn: Binding(get: { on }, set: { new in
+                    if !new && cfg.enabled { confirmOff = true } else { Task { await store.setSwitch(plug, on: new) } }
+                }))
+                .labelsHidden().toggleStyle(.switch).controlSize(.mini)
+                .disabled(busy)
+                .help(on ? L.t("Slå av", "Switch off") : L.t("Slå på", "Switch on"))
+            }
+            .alert(L.t("Slå av \(plug.name)?", "Switch off \(plug.name)?"), isPresented: $confirmOff) {
+                Button(L.t("Slå av", "Switch off"), role: .destructive) { Task { await store.setSwitch(plug, on: false) } }
+                Button(L.t("Avbryt", "Cancel"), role: .cancel) {}
+            } message: {
+                Text(L.t("Pluggen bevakas. Står den avslagen larmar det efter \(Fmt.hours(cfg.hours)).",
+                         "This plug is watched. If it stays off, the alarm goes off after \(Fmt.hours(cfg.hours))."))
+            }
+        }
+    }
+}
+
+/// Watched plugs (the freezers) as tiles side by side, the rest as one line each. The alarm settings of the plug
+/// being edited open below, across the full width, so a narrow tile never has to hold them.
+private struct PlugSection: View {
+    @ObservedObject var store: PlugStore
+    @State private var editing: String?
+
+    var body: some View {
+        let watched = store.plugs.filter { store.config(for: $0).enabled }
+        let others = store.plugs.filter { !store.config(for: $0).enabled }
+        VStack(spacing: 10) {
+            if !watched.isEmpty {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: 10, alignment: .top), GridItem(.flexible(), alignment: .top)], spacing: 10) {
+                    ForEach(watched) { FreezerTile(store: store, plug: $0, editing: $editing) }
+                }
+            }
+            if !others.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(Array(others.enumerated()), id: \.element.id) { i, p in
+                        if i > 0 { Divider() }
+                        PlugRow(store: store, plug: p, editing: $editing)
+                    }
+                }
+                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+            }
+            if let id = editing, let p = store.plugs.first(where: { $0.id == id }) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(L.t("Larminställningar för ", "Alarm settings for ") + p.name, systemImage: "slider.horizontal.3")
+                        .font(.caption.weight(.semibold))
+                    WatchEditor(config: store.configBinding(for: p), hasMeter: p.hasMeter)
+                }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
+            }
+        }
+    }
+}
+
+private struct FreezerTile: View {
+    @ObservedObject var store: PlugStore
+    let plug: Plug
+    @Binding var editing: String?
 
     var body: some View {
         let cfg = store.config(for: plug)
         let st = store.status[plug.id]
         let alarm = st?.idleAlarm == true || st?.offlineAlarm == true
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline) {
-                Label(plug.name, systemImage: cfg.enabled ? "bell.fill" : "powerplug")
-                    .font(.subheadline.weight(.semibold))
-                Spacer()
-                if !plug.online {
-                    Label("Offline", systemImage: "wifi.slash").font(.caption).foregroundStyle(.orange)
-                } else if let on = plug.isOn {
-                    let busy = store.switching.contains(plug.id)
-                    if busy { ProgressView().controlSize(.mini) }
-                    Toggle(on ? L.t("På", "On") : L.t("Av", "Off"), isOn: Binding(get: { on }, set: { new in
-                        // En bevakad plugg är oftast en frys, så den slås inte av med ett felklick.
-                        if !new && cfg.enabled { confirmOff = true } else { Task { await store.setSwitch(plug, on: new) } }
-                    }))
-                    .toggleStyle(.switch).controlSize(.mini).font(.caption)
-                    .foregroundStyle(on ? Color.green : Color.secondary)
-                    .disabled(busy)
-                    .help(on ? L.t("Slå av", "Switch off") : L.t("Slå på", "Switch on"))
-                }
-                Button { editing.toggle() } label: {
-                    Image(systemName: editing ? "chevron.up" : "slider.horizontal.3")
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 4) {
+                Image(systemName: "bell.fill").font(.caption)
+                Text(plug.name).font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
+                Spacer(minLength: 0)
+                PlugToggle(store: store, plug: plug)
+                Button { editing = editing == plug.id ? nil : plug.id } label: {
+                    Image(systemName: editing == plug.id ? "chevron.up" : "slider.horizontal.3")
                 }
                 .buttonStyle(.borderless).help(L.t("Larminställningar", "Alarm settings"))
             }
             if plug.hasMeter {
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    Text(Fmt.watts(plug.power))
-                        .font(.system(size: 26, weight: .medium, design: .rounded)).monospacedDigit()
-                        .foregroundStyle(plug.online ? Color.primary : Color.secondary)
-                    Text([plug.voltage.map { Fmt.num($0, decimals: 0) + " V" },
-                          plug.current.map { Fmt.num($0, decimals: 2) + " A" }].compactMap { $0 }.joined(separator: " · "))
-                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
-                }
+                Text(Fmt.watts(plug.power))
+                    .font(.system(size: 24, weight: .medium, design: .rounded)).monospacedDigit()
+                    .foregroundStyle(plug.online ? Color.primary : Color.secondary)
+                Text([plug.voltage.map { Fmt.num($0, decimals: 0) + " V" },
+                      plug.current.map { Fmt.num($0, decimals: 2) + " A" }].compactMap { $0 }.joined(separator: " · "))
+                    .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
             } else {
                 Text(L.t("Ingen elmätning", "No power metering")).font(.caption).foregroundStyle(.secondary)
             }
-            if cfg.enabled, let st { StatusLine(status: st, config: cfg, hasMeter: plug.hasMeter) }
-            if editing { WatchEditor(config: store.configBinding(for: plug), hasMeter: plug.hasMeter) }
+            if let st { StatusLine(status: st, config: cfg, hasMeter: plug.hasMeter, compact: true) }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(alarm ? AnyShapeStyle(Color.red.opacity(0.15)) : AnyShapeStyle(.quaternary.opacity(0.35)),
                     in: RoundedRectangle(cornerRadius: 8))
-        .alert(L.t("Slå av \(plug.name)?", "Switch off \(plug.name)?"), isPresented: $confirmOff) {
-            Button(L.t("Slå av", "Switch off"), role: .destructive) { Task { await store.setSwitch(plug, on: false) } }
-            Button(L.t("Avbryt", "Cancel"), role: .cancel) {}
-        } message: {
-            Text(L.t("Pluggen bevakas. Står den avslagen larmar det efter \(Fmt.hours(cfg.hours)).",
-                     "This plug is watched. If it stays off, the alarm goes off after \(Fmt.hours(cfg.hours))."))
+    }
+}
+
+private struct PlugRow: View {
+    @ObservedObject var store: PlugStore
+    let plug: Plug
+    @Binding var editing: String?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "powerplug").font(.caption).foregroundStyle(.secondary)
+            Text(plug.name).font(.subheadline).lineLimit(1)
+            Spacer(minLength: 4)
+            if plug.hasMeter {
+                Text(Fmt.watts(plug.power)).font(.subheadline).monospacedDigit()
+                    .foregroundStyle(plug.online ? Color.primary : Color.secondary)
+            } else {
+                Text(L.t("Ingen elmätning", "No power metering")).font(.caption).foregroundStyle(.secondary)
+            }
+            PlugToggle(store: store, plug: plug)
+            Button { editing = editing == plug.id ? nil : plug.id } label: {
+                Image(systemName: editing == plug.id ? "chevron.up" : "slider.horizontal.3")
+            }
+            .buttonStyle(.borderless).help(L.t("Larminställningar", "Alarm settings"))
         }
+        .padding(.horizontal, 10).padding(.vertical, 6)
     }
 }
 
@@ -185,6 +257,8 @@ private struct StatusLine: View {
     let status: AlarmStatus
     let config: WatchConfig
     let hasMeter: Bool
+    /// In a narrow tile: just the alarm limit, the rest is in the settings.
+    var compact = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -205,12 +279,12 @@ private struct StatusLine: View {
         var parts: [String] = []
         if hasMeter {
             parts.append(L.t("Larm under ", "Alarm below ") + Fmt.watts(config.minWatts) + L.t(" i ", " for ") + Fmt.hours(config.hours))
-            if let a = status.lastActive { parts.append(L.t("senast ström ", "last drew power ") + Fmt.time(a)) }
+            if !compact, let a = status.lastActive { parts.append(L.t("senast ström ", "last drew power ") + Fmt.time(a)) }
         }
-        if config.offlineAlarm {
+        if config.offlineAlarm && !compact {
             parts.append(L.t("offline-larm efter ", "offline alarm after ") + Fmt.duration(config.offlineMinutes * 60))
         }
-        if !status.fresh { parts.append(L.t("väntar på färska mätningar", "waiting for fresh readings")) }
+        if !status.fresh { parts.append(L.t("väntar på mätning", "waiting for a reading")) }
         return parts.joined(separator: " · ")
     }
 }
@@ -251,6 +325,15 @@ private struct WatchEditor: View {
 private struct HeatPumpCard: View {
     @ObservedObject var store: PlugStore
     let pump: HeatPump
+    @State private var editing = false
+    @State private var confirmOff = false
+
+    /// While frost protection is active MELCloud ignores the target temperature and the mode, so they are not offered.
+    private var locked: Bool { pump.frost?.isEnabled == true && pump.frost?.active == true }
+
+    private var alarm: Bool {
+        pump.hasError || pump.status?.coldAlarm == true || pump.status?.offlineAlarm == true
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -264,16 +347,38 @@ private struct HeatPumpCard: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .help("Wi-Fi \(Int(r)) dBm")
                 }
-                Text(pump.isOn ? L.t("På", "On") : L.t("Av", "Off")).font(.caption)
-                    .foregroundStyle(pump.isOn ? Color.green : Color.secondary)
+                if store.heatBusy.contains(pump.id) { ProgressView().controlSize(.mini) }
+                Toggle(pump.isOn ? L.t("På", "On") : L.t("Av", "Off"), isOn: Binding(get: { pump.isOn }, set: { new in
+                    // Frost protection is what keeps the pipes safe, so switching off asks first.
+                    if !new { confirmOff = true } else { Task { await store.sendHeat(pump, HeatCommand(power: true)) } }
+                }))
+                .toggleStyle(.switch).controlSize(.mini).font(.caption)
+                .foregroundStyle(pump.isOn ? Color.green : Color.secondary)
+                .disabled(store.heatBusy.contains(pump.id) || !pump.isConnected)
+                Button { editing.toggle() } label: {
+                    Image(systemName: editing ? "chevron.up" : "slider.horizontal.3")
+                }
+                .buttonStyle(.borderless).help(L.t("Larminställningar", "Alarm settings"))
             }
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(Fmt.temp(pump.room, unit: false))
                     .font(.system(size: 26, weight: .medium, design: .rounded)).monospacedDigit()
                 if pump.isOn {
-                    Text([Fmt.mode(pump.mode), L.t("mål ", "target ") + Fmt.temp(pump.set),
-                          L.t("fläkt ", "fan ") + Fmt.fan(pump.fan)].joined(separator: " · "))
-                        .font(.caption).foregroundStyle(.secondary).monospacedDigit()
+                    Menu(Fmt.mode(pump.mode)) {
+                        ForEach(["Heat", "Cool", "Auto", "Dry", "Fan"], id: \.self) { m in
+                            Button(Fmt.mode(m)) { Task { await store.sendHeat(pump, HeatCommand(operationMode: m)) } }
+                        }
+                    }
+                    .menuStyle(.borderlessButton).fixedSize().font(.caption)
+                    .disabled(store.heatBusy.contains(pump.id) || locked)
+                    Spacer()
+                    let target = store.heatTargetValue(pump)
+                    Stepper(value: Binding(get: { target }, set: { store.setHeatTarget(pump, $0) }),
+                            in: (pump.minHeat ?? 10)...(pump.maxHeat ?? 31), step: pump.step ?? 0.5) {
+                        Text(L.t("mål ", "target ") + Fmt.temp(target)).font(.caption).monospacedDigit()
+                    }
+                    .controlSize(.small).fixedSize()
+                    .disabled(locked)
                 }
             }
             if pump.hasError {
@@ -282,9 +387,42 @@ private struct HeatPumpCard: View {
                     .font(.caption).foregroundStyle(.red)
             }
             VStack(alignment: .leading, spacing: 2) {
+                let w = store.heatWatch(for: pump)
+                if let s = pump.status {
+                    if s.coldAlarm == true {
+                        Label(L.t("Kallt: under \(Fmt.temp(w.lowC)) sedan ", "Cold: below \(Fmt.temp(w.lowC)) since ")
+                              + Fmt.time(s.coldSince.map { Date(timeIntervalSince1970: $0) } ?? Date()),
+                              systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                    } else if s.coolWarning == true {
+                        Label(L.t("Svalnar: under \(Fmt.temp(w.warnC))", "Getting cool: below \(Fmt.temp(w.warnC))"),
+                              systemImage: "thermometer.low").foregroundStyle(.orange)
+                    }
+                    if s.offlineAlarm == true {
+                        Label(L.t("Offline, temperaturen syns inte", "Offline, the temperature can't be seen"),
+                              systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red)
+                    }
+                }
+                if w.enabled {
+                    // The alarm limit and today's energy share a line: both are small facts that rarely change.
+                    Label(L.t("Larm under \(Fmt.temp(w.lowC)) i \(Fmt.duration(w.minutes * 60))",
+                              "Alarm below \(Fmt.temp(w.lowC)) for \(Fmt.duration(w.minutes * 60))")
+                          + (store.energyToday.map { " · " + L.t("idag ", "today ") + Fmt.kwh($0) } ?? ""),
+                          systemImage: "bell.fill").foregroundStyle(.secondary)
+                } else {
+                    Label(L.t("Värmepumpens larm är av", "Heat pump alarms are off"), systemImage: "bell.slash").foregroundStyle(.orange)
+                    if let e = store.energyToday {
+                        Label(L.t("Idag ", "Today ") + Fmt.kwh(e), systemImage: "bolt").foregroundStyle(.secondary)
+                    }
+                }
                 if let f = pump.frost, f.isEnabled {
                     Label(L.t("Frostskydd håller ", "Frost protection holds ") + "\(Fmt.num(f.min, decimals: 0))–\(Fmt.num(f.max, decimals: 0)) °C",
                           systemImage: "snowflake").foregroundStyle(.secondary)
+                    if locked {
+                        Label(L.t("Frostskyddet styr pumpen, så måltemperaturen går inte att ändra. Stäng av frostskyddet under reglaget för att ändra den.",
+                                  "Frost protection is in control, so the target temperature can't be changed. Turn it off under the slider icon to change it."),
+                              systemImage: "lock.fill").foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 } else {
                     Label(L.t("Frostskydd är av", "Frost protection is off"), systemImage: "snowflake").foregroundStyle(.orange)
                 }
@@ -292,20 +430,33 @@ private struct HeatPumpCard: View {
                     Label(L.t("Semesterläge är på", "Holiday mode is on") + Self.until(h.endDate),
                           systemImage: "calendar.badge.exclamationmark").foregroundStyle(.orange)
                 }
-                if let e = store.energyToday {
-                    Label(L.t("Idag ", "Today ") + Fmt.kwh(e), systemImage: "bolt").foregroundStyle(.secondary)
-                }
                 if let e = store.heatPumpError {
                     Label(e, systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             .font(.caption)
+            if editing {
+                HeatControlEditor(store: store, pump: pump)
+                HeatWatchEditor(config: store.heatWatchBinding(for: pump))
+            }
         }
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(pump.hasError ? AnyShapeStyle(Color.red.opacity(0.15)) : AnyShapeStyle(.quaternary.opacity(0.35)),
+        .background(alarm ? AnyShapeStyle(Color.red.opacity(0.15)) : AnyShapeStyle(.quaternary.opacity(0.35)),
                     in: RoundedRectangle(cornerRadius: 8))
+        .alert(L.t("Slå av \(pump.name)?", "Switch off \(pump.name)?"), isPresented: $confirmOff) {
+            Button(L.t("Slå av", "Switch off"), role: .destructive) { Task { await store.sendHeat(pump, HeatCommand(power: false)) } }
+            Button(L.t("Avbryt", "Cancel"), role: .cancel) {}
+        } message: {
+            if let f = pump.frost, f.isEnabled {
+                Text(L.t("Frostskyddet är på (\(Fmt.num(f.min, decimals: 0))–\(Fmt.num(f.max, decimals: 0)) °C).",
+                         "Frost protection is on (\(Fmt.num(f.min, decimals: 0))–\(Fmt.num(f.max, decimals: 0)) °C)."))
+            } else {
+                Text(L.t("Frostskyddet är av, så rummet kan bli kallt och vattenrören frysa.",
+                         "Frost protection is off, so the room can get cold and the water pipes can freeze."))
+            }
+        }
     }
 
     /// " till 30 nov 22:18" from the unit's wall-clock end date, or nothing if it can't be read.
@@ -316,6 +467,98 @@ private struct HeatPumpCard: View {
         f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
         guard let d = f.date(from: String(iso.prefix(19))) else { return "" }
         return L.t(" till ", " until ") + Fmt.time(d)
+    }
+}
+
+/// Fan speed, frost protection and holiday mode: things that change rarely, so they live behind the slider icon.
+private struct HeatControlEditor: View {
+    @ObservedObject var store: PlugStore
+    let pump: HeatPump
+    @State private var planning = false
+    @State private var start = Date()
+    @State private var end = Calendar.current.date(byAdding: .day, value: 3, to: Date()) ?? Date()
+
+    var body: some View {
+        let frost = store.frostValue(pump)
+        VStack(alignment: .leading, spacing: 6) {
+            Divider()
+            if pump.isOn {
+                Picker(L.t("Fläkt", "Fan"), selection: Binding(get: { pump.fan ?? "Auto" },
+                                                              set: { f in Task { await store.sendHeat(pump, HeatCommand(setFanSpeed: f)) } })) {
+                    ForEach(["Auto", "One", "Two", "Three", "Four", "Five"], id: \.self) { Text(Fmt.fan($0)).tag($0) }
+                }
+                .pickerStyle(.segmented)
+            }
+            Toggle(L.t("Frostskydd", "Frost protection"), isOn: Binding(get: { frost.isEnabled },
+                                                                       set: { var f = frost; f.isEnabled = $0; store.setFrost(pump, f) }))
+            if frost.isEnabled {
+                Stepper(value: Binding(get: { frost.min }, set: { var f = frost; f.min = $0; store.setFrost(pump, f) }), in: 4...14, step: 1) {
+                    Text(L.t("Värmer när det blir under ", "Heats when it falls below ") + Fmt.temp(frost.min))
+                }
+                Stepper(value: Binding(get: { frost.max }, set: { var f = frost; f.max = $0; store.setFrost(pump, f, changedMax: true) }), in: 6...16, step: 1) {
+                    Text(L.t("Slutar vid ", "Stops at ") + Fmt.temp(frost.max))
+                }
+                Text(L.t("Medan frostskyddet är aktivt styr det pumpen och måltemperaturen går inte att ändra. Håll lägsta gränsen över ert larm.",
+                         "While frost protection is active it controls the unit and the target temperature can't be changed. Keep the lower limit above your alarm."))
+                    .foregroundStyle(.secondary)
+            }
+            if pump.holiday != nil {
+                Label(L.t("Semesterläge är på", "Holiday mode is on"), systemImage: "calendar.badge.exclamationmark").foregroundStyle(.orange)
+                Button(L.t("Stäng av semesterläge", "Turn off holiday mode")) { Task { await store.setHoliday(pump, enabled: false) } }
+                    .disabled(store.heatBusy.contains(pump.id))
+            } else if planning {
+                DatePicker(L.t("Från", "From"), selection: $start, displayedComponents: [.date, .hourAndMinute])
+                DatePicker(L.t("Till", "To"), selection: $end, in: start..., displayedComponents: [.date, .hourAndMinute])
+                Text(L.t("Semesterläge ändrar hur pumpen körs medan ni är borta. Kontrollera att frostskyddet är på.",
+                         "Holiday mode changes how the unit runs while you're away. Check that frost protection is on."))
+                    .foregroundStyle(.orange)
+                HStack {
+                    Button(L.t("Avbryt", "Cancel")) { planning = false }
+                    Spacer()
+                    Button(L.t("Slå på", "Turn on")) {
+                        planning = false
+                        Task { await store.setHoliday(pump, enabled: true, start: start, end: end) }
+                    }
+                }
+            } else {
+                Button(L.t("Planera semesterläge…", "Plan holiday mode…")) { start = Date(); planning = true }
+            }
+        }
+        .font(.caption)
+        .toggleStyle(.switch)
+        .controlSize(.small)
+    }
+}
+
+private struct HeatWatchEditor: View {
+    @Binding var config: HeatWatch
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Divider()
+            Toggle(L.t("Larma för värmepumpen", "Alarm for the heat pump"), isOn: $config.enabled)
+            if config.enabled {
+                Stepper(value: $config.lowC, in: 4...20, step: 0.5) {
+                    Text(L.t("Larma under ", "Alarm below ") + Fmt.temp(config.lowC))
+                }
+                Stepper(value: $config.warnC, in: config.lowC...25, step: 0.5) {
+                    Text(L.t("Varna under ", "Warn below ") + Fmt.temp(config.warnC))
+                }
+                Stepper(value: $config.minutes, in: 10...240, step: 10) {
+                    Text(L.t("Efter ", "After ") + Fmt.duration(config.minutes * 60) + L.t(" under gränsen", " below the limit"))
+                }
+                Toggle(L.t("Larma om pumpen rapporterar fel", "Alarm when the unit reports a fault"), isOn: $config.errorAlarm)
+                Stepper(value: $config.offlineMinutes, in: 10...360, step: 10) {
+                    Text(L.t("Offline-larm efter ", "Offline alarm after ") + Fmt.duration(config.offlineMinutes * 60))
+                }
+                Text(L.t("Temperaturen är värmepumpens egen termometer, som sitter högt på väggen.",
+                         "The temperature is the heat pump's own thermometer, which sits high on the wall."))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .font(.caption)
+        .toggleStyle(.switch)
+        .controlSize(.small)
     }
 }
 
