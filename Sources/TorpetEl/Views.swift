@@ -87,10 +87,10 @@ private struct Header: View {
             }
             Spacer()
             if store.isLoading { ProgressView().controlSize(.small) }
-            Button { Task { await store.refresh() } } label: {
+            Button { Task { await store.refreshNow() } } label: {
                 Image(systemName: "arrow.clockwise")
             }
-            .buttonStyle(.borderless).help(L.t("Hämta nu", "Refresh now"))
+            .buttonStyle(.borderless).help(L.t("Hämta nu från Tuya", "Fetch from Tuya now"))
             Button { store.showSettings.toggle() } label: {
                 Image(systemName: store.showSettings ? "xmark.circle" : "gearshape")
             }

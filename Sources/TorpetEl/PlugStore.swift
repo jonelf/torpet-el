@@ -187,6 +187,17 @@ final class PlugStore: ObservableObject {
 
     private var lastRefresh: Date?
 
+    /// The refresh button: the cloud first fetches from Tuya, then the app reads what it got. If the cloud can't be
+    /// asked (an older version without the route, say), the app still shows what the cloud has.
+    func refreshNow() async {
+        guard await client.isConfigured, !isLoading else { return }
+        isLoading = true
+        try? await client.fetchNow()
+        isLoading = false
+        lastRefresh = nil
+        await refresh()
+    }
+
     /// Tuya-fel som molnet rapporterar, eller att molnet inte hämtat på länge.
     private func cloudProblem(_ snap: CloudSnapshot) -> String? {
         if let e = snap.tuyaError {

@@ -707,6 +707,15 @@ async function http(event) {
     return json(200, { device: sw[1], on: body.on });
   }
 
+  // Fetches from Tuya now, instead of waiting for the next five-minute poll. A second request within 20 seconds just
+  // gets the last fetch, so a nervous finger can't pile up calls to Tuya.
+  if (method === 'POST' && path === '/refresh') {
+    const last = (await getItem('META'))?.fetchedAt;
+    if (last && now - last < 20) return json(200, { fetchedAt: last, skipped: true });
+    await pollTuya(cfg).catch((e) => console.error('Tuya refresh:', e));
+    return json(200, { fetchedAt: (await getItem('META'))?.fetchedAt ?? null });
+  }
+
   if (method === 'POST' && path === '/test') {
     const ok = await notify(cfg, {
       title: 'Torpet El', body: L('Så här ser ett larm ut.', 'This is what an alarm looks like.'), priority: 3, tags: ['bell'],

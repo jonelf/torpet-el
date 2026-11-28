@@ -123,6 +123,9 @@ at least 2 apart) and `PUT /heatpump/<id>/holiday` takes `{ "isEnabled", "startD
 `PUT /heatpump/watch/<id>` with body `{ "enabled", "lowC", "warnC", "minutes", "errorAlarm", "offlineMinutes" }` saves the heat pump's alarm
 settings. `/status` has them per heat pump as `watch`, with `status` (`coldAlarm`, `coolWarning`, `errorAlarm`, `offlineAlarm`).
 
+`POST /refresh` fetches from Tuya right away, as the poll does, and answers `{ "fetchedAt" }`. A second call within 20 seconds just
+returns the last fetch. The refresh button in the app uses it.
+
 `POST /test` sends a test notification.
 
 ## Table `TorpetEl`

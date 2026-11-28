@@ -283,6 +283,11 @@ actor CloudClient {
         _ = try await send("POST", "switch/\(id)", body: try JSONEncoder().encode(["on": on]))
     }
 
+    /// Asks the cloud to fetch from Tuya now instead of at its next five-minute poll.
+    func fetchNow() async throws {
+        _ = try await send("POST", "refresh")
+    }
+
     /// Asks the cloud to send a test alarm through ntfy.
     func test() async throws {
         _ = try await send("POST", "test")
